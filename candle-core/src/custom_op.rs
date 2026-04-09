@@ -151,6 +151,180 @@ pub trait CustomOp3 {
     }
 }
 
+pub trait CustomOp4 {
+    fn name(&self) -> &'static str;
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+        s3: &CpuStorage,
+        l3: &Layout,
+        s4: &CpuStorage,
+        l4: &Layout,
+    ) -> Result<(CpuStorage, Shape)>;
+
+    fn cuda_fwd(
+        &self,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        Err(crate::Error::Cuda(
+            format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn metal_fwd(
+        &self,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+    ) -> Result<(MetalStorage, Shape)> {
+        Err(crate::Error::Metal(
+            format!("no metal implementation for {}", self.name()).into(),
+        ))
+    }
+}
+
+pub trait CustomOp6 {
+    fn name(&self) -> &'static str;
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+        s3: &CpuStorage,
+        l3: &Layout,
+        s4: &CpuStorage,
+        l4: &Layout,
+        s5: &CpuStorage,
+        l5: &Layout,
+        s6: &CpuStorage,
+        l6: &Layout,
+    ) -> Result<(CpuStorage, Shape)>;
+
+    fn cuda_fwd(
+        &self,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        Err(crate::Error::Cuda(
+            format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn metal_fwd(
+        &self,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+    ) -> Result<(MetalStorage, Shape)> {
+        Err(crate::Error::Metal(
+            format!("no metal implementation for {}", self.name()).into(),
+        ))
+    }
+}
+
+pub trait CustomOp7 {
+    fn name(&self) -> &'static str;
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+        s3: &CpuStorage,
+        l3: &Layout,
+        s4: &CpuStorage,
+        l4: &Layout,
+        s5: &CpuStorage,
+        l5: &Layout,
+        s6: &CpuStorage,
+        l6: &Layout,
+        s7: &CpuStorage,
+        l7: &Layout,
+    ) -> Result<(CpuStorage, Shape)>;
+
+    fn cuda_fwd(
+        &self,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+        _: &CudaStorage,
+        _: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        Err(crate::Error::Cuda(
+            format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn metal_fwd(
+        &self,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+        _: &MetalStorage,
+        _: &Layout,
+    ) -> Result<(MetalStorage, Shape)> {
+        Err(crate::Error::Metal(
+            format!("no metal implementation for {}", self.name()).into(),
+        ))
+    }
+}
+
 impl Tensor {
     /// Applies a unary custom op without backward support
     pub fn apply_op1_no_bwd<C: CustomOp1>(&self, c: &C) -> Result<Self> {
@@ -174,6 +348,84 @@ impl Tensor {
             t2.layout(),
             &t3.storage(),
             t3.layout(),
+            c,
+        )?;
+        Ok(from_storage(storage, shape, BackpropOp::none(), false))
+    }
+
+    /// Applies a 4-ary custom op without backward support
+    pub fn apply_op4_no_bwd<C: CustomOp4>(
+        &self,
+        t2: &Self,
+        t3: &Self,
+        t4: &Self,
+        c: &C,
+    ) -> Result<Self> {
+        let (storage, shape) = self.storage().apply_op4(
+            self.layout(),
+            &t2.storage(),
+            t2.layout(),
+            &t3.storage(),
+            t3.layout(),
+            &t4.storage(),
+            t4.layout(),
+            c,
+        )?;
+        Ok(from_storage(storage, shape, BackpropOp::none(), false))
+    }
+
+    /// Applies a 6-ary custom op without backward support
+    pub fn apply_op6_no_bwd<C: CustomOp6>(
+        &self,
+        t2: &Self,
+        t3: &Self,
+        t4: &Self,
+        t5: &Self,
+        t6: &Self,
+        c: &C,
+    ) -> Result<Self> {
+        let (storage, shape) = self.storage().apply_op6(
+            self.layout(),
+            &t2.storage(),
+            t2.layout(),
+            &t3.storage(),
+            t3.layout(),
+            &t4.storage(),
+            t4.layout(),
+            &t5.storage(),
+            t5.layout(),
+            &t6.storage(),
+            t6.layout(),
+            c,
+        )?;
+        Ok(from_storage(storage, shape, BackpropOp::none(), false))
+    }
+
+    /// Applies a 7-ary custom op without backward support
+    pub fn apply_op7_no_bwd<C: CustomOp7>(
+        &self,
+        t2: &Self,
+        t3: &Self,
+        t4: &Self,
+        t5: &Self,
+        t6: &Self,
+        t7: &Self,
+        c: &C,
+    ) -> Result<Self> {
+        let (storage, shape) = self.storage().apply_op7(
+            self.layout(),
+            &t2.storage(),
+            t2.layout(),
+            &t3.storage(),
+            t3.layout(),
+            &t4.storage(),
+            t4.layout(),
+            &t5.storage(),
+            t5.layout(),
+            &t6.storage(),
+            t6.layout(),
+            &t7.storage(),
+            t7.layout(),
             c,
         )?;
         Ok(from_storage(storage, shape, BackpropOp::none(), false))
