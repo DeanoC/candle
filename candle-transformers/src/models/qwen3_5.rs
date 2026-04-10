@@ -5641,6 +5641,8 @@ impl FullAttention {
             profile_elapsed(output_reshape_start, device)?;
         if external_full_attention.is_none() {
             self.kv_cache = Some((key_states, value_states));
+        } else {
+            self.kv_cache = None;
         }
         let gate_start = profile_start(device)?;
         let gated = attn_output.broadcast_mul(&ops::sigmoid(&gate)?)?;
