@@ -4404,6 +4404,7 @@ struct GatedDeltaNet {
     recurrent_state: Option<Tensor>,
     chunk_cache: Option<LinearChunkCache>,
     value_cache: Option<LinearValueCache>,
+    conv_weight_cache: Option<LinearConvWeightCache>,
 }
 
 #[derive(Debug, Clone)]
@@ -4423,6 +4424,13 @@ struct LinearValueCache {
     device_location: DeviceLocation,
     dt_bias: Tensor,
     a_log_exp: Tensor,
+}
+
+#[derive(Debug, Clone)]
+struct LinearConvWeightCache {
+    dtype: DType,
+    device_location: DeviceLocation,
+    packed_weight: Tensor,
 }
 
 impl GatedDeltaNet {
@@ -4474,6 +4482,7 @@ impl GatedDeltaNet {
             recurrent_state: None,
             chunk_cache: None,
             value_cache: None,
+            conv_weight_cache: None,
         })
     }
 
@@ -4545,6 +4554,35 @@ impl GatedDeltaNet {
         };
         self.chunk_cache = Some(cache.clone());
         Ok(cache)
+    }
+
+    fn packed_conv_weight(&mut self, device: &Device, dtype: DType) -> Result<Tensor> {
+        let device_location = device.location();
+        let rebuild = self
+            .conv_weight_cache
+            .as_ref()
+            .map(|cache| cache.dtype != dtype || cache.device_location != device_location)
+            .unwrap_or(true);
+        if rebuild {
+            let packed_weight = self.conv1d.weight().squeeze(1)?;
+            let packed_weight = if packed_weight.dtype() == dtype {
+                packed_weight
+            } else {
+                packed_weight.to_dtype(dtype)?
+            }
+            .contiguous()?;
+            self.conv_weight_cache = Some(LinearConvWeightCache {
+                dtype,
+                device_location,
+                packed_weight,
+            });
+        }
+        Ok(self
+            .conv_weight_cache
+            .as_ref()
+            .expect("linear conv weight cache must be initialized")
+            .packed_weight
+            .clone())
     }
 
     fn chunk_gated_delta_rule_torch_like(
@@ -4818,7 +4856,7 @@ impl GatedDeltaNet {
     fn run_depthwise_conv_packed_prefill(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
         let seq_len = mixed_qkv.dim(2)?;
         let mixed_qkv = self.prepare_depthwise_conv_input(mixed_qkv)?.contiguous()?;
-        let weights = self.conv1d.weight().squeeze(1)?.contiguous()?;
+        let weights = self.packed_conv_weight(mixed_qkv.device(), mixed_qkv.dtype())?;
         linear_prefill_conv_pack(&mixed_qkv, &weights, seq_len, self.conv_kernel_size)
     }
 
