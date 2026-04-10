@@ -3961,7 +3961,8 @@ impl FullAttention {
 
                 let score_start = profile_start(device)?;
                 let k_block = key_states_f.narrow(2, k_start, k_block_len)?;
-                let mut scores = (q_block.matmul(&k_block.transpose(2, 3)?)? * scale)?;
+                let k_block_t = k_block.transpose(2, 3)?.contiguous()?;
+                let mut scores = (q_block.matmul(&k_block_t)? * scale)?;
                 let needs_partial_mask = !(k_abs_max <= q_abs_min);
                 if needs_partial_mask {
                     let mask = Self::causal_block_mask(
@@ -4617,7 +4618,9 @@ impl GatedDeltaNet {
 
         let prepare_start = profile_start(device)?;
         let batch_heads = batch_size * num_heads;
-        let k_beta = key.broadcast_mul(&beta.unsqueeze(D::Minus1)?)?;
+        let k_beta = key
+            .broadcast_mul(&beta.unsqueeze(D::Minus1)?)?
+            .contiguous()?;
         let v_beta = value.broadcast_mul(&beta.unsqueeze(D::Minus1)?)?;
         let query = query.reshape((batch_heads, num_chunks, chunk_size, k_head_dim))?;
         let key = key.reshape((batch_heads, num_chunks, chunk_size, k_head_dim))?;
@@ -4641,8 +4644,9 @@ impl GatedDeltaNet {
 
         let solve_start = profile_start(device)?;
         let solve_batch = batch_heads * num_chunks;
+        let key_t = key.transpose(3, 2)?.contiguous()?;
         let base_attn = k_beta
-            .matmul(&key.transpose(3, 2)?)?
+            .matmul(&key_t)?
             .broadcast_mul(&decay_mask)?
             .neg()?
             .broadcast_mul(&strict_lower_2d)?
@@ -4704,8 +4708,9 @@ impl GatedDeltaNet {
             let v_new = v_i.broadcast_sub(&v_prime)?;
 
             let local_attn_start = profile_start(device)?;
+            let k_i_t = k_i.transpose(2, 1)?.contiguous()?;
             let local_attn = q_i
-                .matmul(&k_i.transpose(2, 1)?)?
+                .matmul(&k_i_t)?
                 .broadcast_mul(&decay_i)?
                 .broadcast_mul(&lower_2d)?;
             let local_out = local_attn.matmul(&v_new)?;
@@ -5212,7 +5217,9 @@ impl GatedDeltaNet {
         }
 
         let prepare_start = profile_start(device)?;
-        let k_beta = key.broadcast_mul(&beta.unsqueeze(D::Minus1)?)?;
+        let k_beta = key
+            .broadcast_mul(&beta.unsqueeze(D::Minus1)?)?
+            .contiguous()?;
         let g = g_raw.cumsum(D::Minus1)?;
         let exp_g = g.exp()?;
 
@@ -5220,14 +5227,21 @@ impl GatedDeltaNet {
         let lower = cache.lower;
         let eye = cache.eye;
         let strict_lower = cache.strict_lower;
+        let solve_batch = batch_heads * num_chunks;
 
         let decay_mask = g
             .unsqueeze(4)?
             .broadcast_sub(&g.unsqueeze(3)?)?
             .exp()?
             .broadcast_mul(&lower)?;
-        let base_attn = k_beta
-            .matmul(&key.transpose(4, 3)?)?
+        let k_beta_flat = k_beta.reshape((solve_batch, chunk_size, k_head_dim))?;
+        let key_t = key
+            .transpose(4, 3)?
+            .contiguous()?
+            .reshape((solve_batch, k_head_dim, chunk_size))?;
+        let base_attn = k_beta_flat
+            .matmul(&key_t)?
+            .reshape((batch_size, num_heads, num_chunks, chunk_size, chunk_size))?
             .broadcast_mul(&decay_mask)?
             .neg()?
             .broadcast_mul(&strict_lower)?;
@@ -5286,7 +5300,14 @@ impl GatedDeltaNet {
 
             Tensor::cat(&rows.iter().collect::<Vec<_>>(), 3)?.broadcast_add(&eye)?
         };
-        let k_cumdecay = attn.matmul(&k_beta.broadcast_mul(&exp_g.unsqueeze(D::Minus1)?)?)?;
+        let k_cumdecay_rhs = k_beta
+            .broadcast_mul(&exp_g.unsqueeze(D::Minus1)?)?
+            .contiguous()?
+            .reshape((solve_batch, chunk_size, k_head_dim))?;
+        let k_cumdecay = attn
+            .reshape((solve_batch, chunk_size, chunk_size))?
+            .matmul(&k_cumdecay_rhs)?
+            .reshape((batch_size, num_heads, num_chunks, chunk_size, k_head_dim))?;
         profile.linear_chunk_solve_millis += profile_elapsed(solve_start, device)?;
 
         let lower_2d = cache.lower_2d;
@@ -5312,10 +5333,13 @@ impl GatedDeltaNet {
         };
         let local_attn_scan = match scan_mode {
             DeltaNetScanMode::PrebatchedLocal => Some(
-                query_scan
-                    .matmul(&key_scan.transpose(3, 2)?)?
-                    .broadcast_mul(&decay_scan)?
-                    .broadcast_mul(&lower_2d.reshape((1, 1, chunk_size, chunk_size))?)?,
+                {
+                    let key_scan_t = key_scan.transpose(3, 2)?.contiguous()?;
+                    query_scan
+                        .matmul(&key_scan_t)?
+                        .broadcast_mul(&decay_scan)?
+                        .broadcast_mul(&lower_2d.reshape((1, 1, chunk_size, chunk_size))?)?
+                },
             ),
             _ => None,
         };
