@@ -536,6 +536,8 @@ fn use_delta_chunk_fused_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
+    chunk_size: usize,
+    k_head_dim: usize,
 ) -> bool {
     let scan_mode_supported = match device.location() {
         DeviceLocation::Metal { .. } => matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal),
@@ -546,6 +548,11 @@ fn use_delta_chunk_fused_kernel(
         _ => false,
     };
     if !(scan_mode_supported && sequence_length >= 4096) {
+        return false;
+    }
+    if matches!(device.location(), DeviceLocation::Cuda { .. })
+        && (chunk_size > 64 || k_head_dim > 256)
+    {
         return false;
     }
 
@@ -562,8 +569,15 @@ fn use_delta_full_scan_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
+    chunk_size: usize,
+    k_head_dim: usize,
 ) -> bool {
     if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal) && sequence_length >= 4096) {
+        return false;
+    }
+    if matches!(device.location(), DeviceLocation::Cuda { .. })
+        && (chunk_size > 64 || k_head_dim > 256)
+    {
         return false;
     }
 
@@ -5435,10 +5449,20 @@ impl GatedDeltaNet {
         let use_state_kernel = use_delta_state_kernel(query.device(), scan_mode, sequence_length);
         let use_state_scan_kernel =
             use_delta_state_scan_kernel(query.device(), scan_mode, sequence_length);
-        let use_chunk_fused_kernel =
-            use_delta_chunk_fused_kernel(query.device(), scan_mode, sequence_length);
-        let use_full_scan_kernel =
-            use_delta_full_scan_kernel(query.device(), scan_mode, sequence_length);
+        let use_chunk_fused_kernel = use_delta_chunk_fused_kernel(
+            query.device(),
+            scan_mode,
+            sequence_length,
+            chunk_size,
+            k_head_dim,
+        );
+        let use_full_scan_kernel = use_delta_full_scan_kernel(
+            query.device(),
+            scan_mode,
+            sequence_length,
+            chunk_size,
+            k_head_dim,
+        );
         let full_scan = if use_full_scan_kernel {
             let full_pack_start = profile_start(device)?;
             let state_decay_scan = state_decay_scan
