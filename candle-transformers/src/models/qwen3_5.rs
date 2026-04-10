@@ -184,6 +184,13 @@ pub struct RuntimeProfile {
     pub attention_softmax_millis: f64,
     pub attention_mix_millis: f64,
     pub output_projection_millis: f64,
+    pub full_attention_mask_prepare_millis: f64,
+    pub full_attention_input_layout_millis: f64,
+    pub full_attention_kv_materialize_millis: f64,
+    pub full_attention_output_collect_millis: f64,
+    pub full_attention_output_reshape_millis: f64,
+    pub full_attention_gate_millis: f64,
+    pub full_attention_kernel_execute_millis: f64,
     pub scheduler_planning_millis: f64,
     pub transfer_millis: f64,
     pub linear_attention_millis: f64,
@@ -212,6 +219,13 @@ impl RuntimeProfile {
         self.attention_softmax_millis += other.attention_softmax_millis;
         self.attention_mix_millis += other.attention_mix_millis;
         self.output_projection_millis += other.output_projection_millis;
+        self.full_attention_mask_prepare_millis += other.full_attention_mask_prepare_millis;
+        self.full_attention_input_layout_millis += other.full_attention_input_layout_millis;
+        self.full_attention_kv_materialize_millis += other.full_attention_kv_materialize_millis;
+        self.full_attention_output_collect_millis += other.full_attention_output_collect_millis;
+        self.full_attention_output_reshape_millis += other.full_attention_output_reshape_millis;
+        self.full_attention_gate_millis += other.full_attention_gate_millis;
+        self.full_attention_kernel_execute_millis += other.full_attention_kernel_execute_millis;
         self.scheduler_planning_millis += other.scheduler_planning_millis;
         self.transfer_millis += other.transfer_millis;
         self.linear_attention_millis += other.linear_attention_millis;
@@ -240,6 +254,17 @@ impl RuntimeProfile {
             attention_softmax_millis: self.attention_softmax_millis * factor,
             attention_mix_millis: self.attention_mix_millis * factor,
             output_projection_millis: self.output_projection_millis * factor,
+            full_attention_mask_prepare_millis: self.full_attention_mask_prepare_millis * factor,
+            full_attention_input_layout_millis: self.full_attention_input_layout_millis * factor,
+            full_attention_kv_materialize_millis: self.full_attention_kv_materialize_millis
+                * factor,
+            full_attention_output_collect_millis: self.full_attention_output_collect_millis
+                * factor,
+            full_attention_output_reshape_millis: self.full_attention_output_reshape_millis
+                * factor,
+            full_attention_gate_millis: self.full_attention_gate_millis * factor,
+            full_attention_kernel_execute_millis: self.full_attention_kernel_execute_millis
+                * factor,
             scheduler_planning_millis: self.scheduler_planning_millis * factor,
             transfer_millis: self.transfer_millis * factor,
             linear_attention_millis: self.linear_attention_millis * factor,
@@ -637,6 +662,33 @@ fn use_linear_prefill_packed_kernel(device: &Device, sequence_length: usize) -> 
     }
 }
 
+fn use_full_attention_prefill_megakernel(
+    device: &Device,
+    q_len: usize,
+    kv_len: usize,
+    seqlen_offset: usize,
+) -> bool {
+    if !(matches!(device.location(), DeviceLocation::Metal { .. })
+        && q_len >= 2048
+        && kv_len == q_len + seqlen_offset)
+    {
+        return false;
+    }
+
+    match std::env::var("CANDLE_QWEN35_FULL_PREFILL_MEGAKERNEL") {
+        Ok(value)
+            if matches!(
+                value.as_str(),
+                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+            ) =>
+        {
+            false
+        }
+        Ok(_) => true,
+        Err(_) => true,
+    }
+}
+
 fn use_delta_chunk_scan_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
@@ -775,6 +827,168 @@ fn linear_prefill_conv_pack(
             total_len,
             seq_len,
             kernel_size,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FullAttentionPrefillMegakernel {
+    batch_size: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    q_len: usize,
+    kv_len: usize,
+    head_dim: usize,
+    num_kv_groups: usize,
+    scale: f32,
+    seqlen_offset: usize,
+}
+
+impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
+    fn name(&self) -> &'static str {
+        "full-attention-prefill-megakernel"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &candle::CpuStorage,
+        _l1: &candle::Layout,
+        _s2: &candle::CpuStorage,
+        _l2: &candle::Layout,
+        _s3: &candle::CpuStorage,
+        _l3: &candle::Layout,
+    ) -> Result<(candle::CpuStorage, candle::Shape)> {
+        candle::bail!("full-attention-prefill-megakernel has no cpu implementation")
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(
+        &self,
+        query: &candle::MetalStorage,
+        query_layout: &candle::Layout,
+        key: &candle::MetalStorage,
+        key_layout: &candle::Layout,
+        value: &candle::MetalStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::MetalStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::MetalError;
+
+        if !(query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("full-attention-prefill-megakernel requires contiguous inputs")
+        }
+
+        let (batch_size, q_heads, q_len, head_dim) = query_layout.shape().dims4()?;
+        let (key_batch, kv_heads, kv_len, key_head_dim) = key_layout.shape().dims4()?;
+        let (value_batch, value_kv_heads, value_kv_len, value_head_dim) =
+            value_layout.shape().dims4()?;
+        if batch_size != self.batch_size
+            || key_batch != self.batch_size
+            || value_batch != self.batch_size
+            || q_heads != self.q_heads
+            || kv_heads != self.kv_heads
+            || value_kv_heads != self.kv_heads
+            || q_len != self.q_len
+            || kv_len != self.kv_len
+            || value_kv_len != self.kv_len
+            || head_dim != self.head_dim
+            || key_head_dim != self.head_dim
+            || value_head_dim != self.head_dim
+        {
+            candle::bail!(
+                "full-attention-prefill-megakernel shape mismatch: query={:?} key={:?} value={:?}",
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = query.device();
+        let dtype = match query.dtype() {
+            DType::F16 => candle_metal_kernels::DType::F16,
+            DType::F32 => candle_metal_kernels::DType::F32,
+            DType::BF16 => candle_metal_kernels::DType::BF16,
+            other => candle::bail!("full-attention-prefill-megakernel unsupported dtype {other:?}"),
+        };
+        let out_shape =
+            candle::Shape::from((self.batch_size, self.q_heads, self.q_len, self.head_dim));
+        let elem_count = out_shape.elem_count();
+        let output = device.new_buffer(
+            elem_count,
+            query.dtype(),
+            "full-attention-prefill-megakernel",
+        )?;
+        let encoder = device.command_encoder()?;
+        encoder.set_label("full-attention-prefill-megakernel");
+        candle_metal_kernels::call_full_attention_prefill(
+            device.metal_device(),
+            &encoder,
+            device.kernels(),
+            dtype,
+            self.batch_size,
+            self.q_heads,
+            self.kv_heads,
+            self.q_len,
+            self.kv_len,
+            self.head_dim,
+            self.num_kv_groups,
+            self.scale,
+            self.seqlen_offset,
+            candle_metal_kernels::BufferOffset {
+                buffer: query.buffer(),
+                offset_in_bytes: query_layout.start_offset() * query.dtype().size_in_bytes(),
+            },
+            candle_metal_kernels::BufferOffset {
+                buffer: key.buffer(),
+                offset_in_bytes: key_layout.start_offset() * key.dtype().size_in_bytes(),
+            },
+            candle_metal_kernels::BufferOffset {
+                buffer: value.buffer(),
+                offset_in_bytes: value_layout.start_offset() * value.dtype().size_in_bytes(),
+            },
+            &output,
+        )
+        .map_err(MetalError::from)?;
+        Ok((
+            candle::MetalStorage::new(output, device.clone(), elem_count, query.dtype()),
+            out_shape,
+        ))
+    }
+}
+
+fn full_attention_prefill_megakernel(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    num_kv_groups: usize,
+    scale: f32,
+    seqlen_offset: usize,
+) -> Result<Tensor> {
+    let (batch_size, q_heads, q_len, head_dim) = query.dims4()?;
+    let (_, kv_heads, kv_len, value_head_dim) = value.dims4()?;
+    if value_head_dim != head_dim {
+        candle::bail!(
+            "full-attention-prefill-megakernel requires matching head dims, got q={} v={}",
+            head_dim,
+            value_head_dim
+        )
+    }
+    query.apply_op3_no_bwd(
+        key,
+        value,
+        &FullAttentionPrefillMegakernel {
+            batch_size,
+            q_heads,
+            kv_heads,
+            q_len,
+            kv_len,
+            head_dim,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
         },
     )
 }
@@ -2732,9 +2946,11 @@ impl FullAttention {
         let compute_dtype = query_states.dtype();
         let (_, q_heads, _, _) = query_states.dims4()?;
         let (_, kv_heads, _, _) = key_states.dims4()?;
+        let mask_start = profile_start(device)?;
         let mask = attention_mask
             .map(|mask| mask.to_dtype(compute_dtype))
             .transpose()?;
+        profile.full_attention_mask_prepare_millis += profile_elapsed(mask_start, device)?;
         let mut outputs = Vec::with_capacity(kv_heads);
 
         for kv_head_idx in 0..kv_heads {
@@ -2743,11 +2959,15 @@ impl FullAttention {
             if q_head_len == 0 {
                 break;
             }
+            let query_layout_start = profile_start(device)?;
             let q_chunk = query_states
                 .narrow(1, q_head_start, q_head_len)?
                 .contiguous()?;
+            profile.full_attention_input_layout_millis +=
+                profile_elapsed(query_layout_start, device)?;
             let kv_len = key_states.dim(2)?;
             let value_dim = value_states.dim(3)?;
+            let kv_materialize_start = profile_start(device)?;
             let k_chunk = key_states.narrow(1, kv_head_idx, 1)?.broadcast_as((
                 q_chunk.dim(0)?,
                 q_head_len,
@@ -2761,6 +2981,8 @@ impl FullAttention {
                 value_dim,
             ))?;
             let key_states_t = k_chunk.transpose(2, 3)?.contiguous()?;
+            profile.full_attention_kv_materialize_millis +=
+                profile_elapsed(kv_materialize_start, device)?;
 
             let score_start = profile_start(device)?;
             let mut attn_weights = (q_chunk.matmul(&key_states_t)? * scale)?;
@@ -2780,7 +3002,10 @@ impl FullAttention {
             outputs.push(attn_output);
         }
 
-        Tensor::cat(&outputs.iter().collect::<Vec<_>>(), 1)
+        let collect_start = profile_start(device)?;
+        let output = Tensor::cat(&outputs.iter().collect::<Vec<_>>(), 1)?;
+        profile.full_attention_output_collect_millis += profile_elapsed(collect_start, device)?;
+        Ok(output)
     }
 
     fn new(cfg: &TextConfig, rotary_emb: Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
@@ -2889,14 +3114,34 @@ impl FullAttention {
         };
         profile.kv_append_write_millis += profile_elapsed(kv_append_start, device)?;
 
-        let layout_start = profile_start(device)?;
+        let input_layout_start = profile_start(device)?;
         let query_states = query_states.contiguous()?;
         let key_states = key_states.contiguous()?;
         let value_states = value_states.contiguous()?;
         let scale = 1f64 / f64::sqrt(self.head_dim as f64);
-        profile.layout_prepare_millis += profile_elapsed(layout_start, device)?;
+        let input_layout_elapsed = profile_elapsed(input_layout_start, device)?;
+        profile.layout_prepare_millis += input_layout_elapsed;
+        profile.full_attention_input_layout_millis += input_layout_elapsed;
 
-        let attn_output = if use_full_attention_torchlike_eager(device) {
+        let attn_output = if use_full_attention_prefill_megakernel(
+            device,
+            q_len,
+            key_states.dim(2)?,
+            seqlen_offset,
+        ) {
+            let kernel_start = profile_start(device)?;
+            let output = full_attention_prefill_megakernel(
+                &query_states,
+                &key_states,
+                &value_states,
+                self.num_kv_groups,
+                scale as f32,
+                seqlen_offset,
+            )?
+            .to_dtype(DType::F32)?;
+            profile.full_attention_kernel_execute_millis += profile_elapsed(kernel_start, device)?;
+            output
+        } else if use_full_attention_torchlike_eager(device) {
             self.grouped_torchlike_eager_attention_profiled(
                 &query_states,
                 &key_states,
@@ -2928,12 +3173,14 @@ impl FullAttention {
             )?
             .to_dtype(DType::F32)?
         } else {
-            let layout_start = profile_start(device)?;
+            let kv_materialize_start = profile_start(device)?;
             let key_states =
                 crate::utils::repeat_kv(key_states.clone(), self.num_kv_groups)?.contiguous()?;
             let value_states =
                 crate::utils::repeat_kv(value_states.clone(), self.num_kv_groups)?.contiguous()?;
-            profile.layout_prepare_millis += profile_elapsed(layout_start, device)?;
+            let kv_materialize_elapsed = profile_elapsed(kv_materialize_start, device)?;
+            profile.layout_prepare_millis += kv_materialize_elapsed;
+            profile.full_attention_kv_materialize_millis += kv_materialize_elapsed;
 
             let query_states_f = query_states.to_dtype(DType::F32)?;
             let key_states_f = key_states.to_dtype(DType::F32)?;
@@ -2971,13 +3218,18 @@ impl FullAttention {
             }
         };
 
-        let output_start = profile_start(device)?;
+        let output_reshape_start = profile_start(device)?;
         let attn_output = attn_output
             .transpose(1, 2)?
             .reshape((b_sz, q_len, self.attention_size))?
             .to_dtype(xs.dtype())?;
+        profile.full_attention_output_reshape_millis +=
+            profile_elapsed(output_reshape_start, device)?;
         self.kv_cache = Some((key_states, value_states));
+        let gate_start = profile_start(device)?;
         let gated = attn_output.broadcast_mul(&ops::sigmoid(&gate)?)?;
+        profile.full_attention_gate_millis += profile_elapsed(gate_start, device)?;
+        let output_start = profile_start(device)?;
         let output = gated.apply(&self.o_proj)?;
         profile.output_projection_millis += profile_elapsed(output_start, device)?;
         profile.full_attention_millis += profile_elapsed(full_start, device)?;
@@ -3205,10 +3457,19 @@ impl GatedDeltaNet {
             key.clone()
         };
 
-        let mut query = query.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
+        let mut query = query
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
         let mut key = key.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
-        let mut value = value.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
-        let mut beta = beta.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
+        let mut value = value
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
+        let mut beta = beta
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
         let mut g = g.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
 
         let (batch_size, num_heads, sequence_length, k_head_dim) = query.dims4()?;
@@ -3238,11 +3499,8 @@ impl GatedDeltaNet {
             .cumsum(D::Minus1)?;
         let cache = self.chunk_cache(query.device(), compute_dtype, chunk_size)?;
         let lower_2d = cache.lower_2d.reshape((1, chunk_size, chunk_size))?;
-        let eye_2d = Tensor::eye(chunk_size, compute_dtype, query.device())?.reshape((
-            1,
-            chunk_size,
-            chunk_size,
-        ))?;
+        let eye_2d = Tensor::eye(chunk_size, compute_dtype, query.device())?
+            .reshape((1, chunk_size, chunk_size))?;
         let strict_lower_2d = lower_2d.broadcast_sub(&eye_2d)?;
         let decay_mask = g
             .unsqueeze(3)?
@@ -3278,9 +3536,9 @@ impl GatedDeltaNet {
                 .sum(1)?
                 .reshape((solve_batch, i))?;
             let row = row.broadcast_add(&correction)?;
-            let row = row
-                .pad_with_zeros(1, 0, chunk_size - i)?
-                .reshape((solve_batch, 1, chunk_size))?;
+            let row =
+                row.pad_with_zeros(1, 0, chunk_size - i)?
+                    .reshape((solve_batch, 1, chunk_size))?;
             rows.push(row);
         }
         let attn = Tensor::cat(&rows.iter().collect::<Vec<_>>(), 1)?
@@ -3291,8 +3549,11 @@ impl GatedDeltaNet {
         profile.linear_chunk_solve_millis += profile_elapsed(solve_start, device)?;
 
         let scan_start = profile_start(device)?;
-        let mut last_recurrent_state =
-            Tensor::zeros((batch_heads, k_head_dim, v_head_dim), compute_dtype, query.device())?;
+        let mut last_recurrent_state = Tensor::zeros(
+            (batch_heads, k_head_dim, v_head_dim),
+            compute_dtype,
+            query.device(),
+        )?;
         let mut outputs = Vec::with_capacity(num_chunks);
         for chunk_idx in 0..num_chunks {
             let q_i = query.i((.., chunk_idx, .., ..))?;
@@ -3302,7 +3563,9 @@ impl GatedDeltaNet {
             let decay_i = decay_mask.i((.., chunk_idx, .., ..))?;
 
             let recurrent_read_start = profile_start(device)?;
-            let v_prime = k_cumdecay.i((.., chunk_idx, .., ..))?.matmul(&last_recurrent_state)?;
+            let v_prime = k_cumdecay
+                .i((.., chunk_idx, .., ..))?
+                .matmul(&last_recurrent_state)?;
             let attn_inter = q_i
                 .broadcast_mul(&g_i.exp()?.unsqueeze(D::Minus1)?)?
                 .matmul(&last_recurrent_state)?;
@@ -3565,10 +3828,19 @@ impl GatedDeltaNet {
             key.clone()
         };
 
-        let mut query = query.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
+        let mut query = query
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
         let mut key = key.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
-        let mut value = value.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
-        let mut beta = beta.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
+        let mut value = value
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
+        let mut beta = beta
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_dtype(compute_dtype)?;
         let mut g = g.transpose(1, 2)?.contiguous()?.to_dtype(compute_dtype)?;
 
         let (batch_size, num_heads, sequence_length, k_head_dim) = query.dims4()?;
@@ -3651,20 +3923,8 @@ impl GatedDeltaNet {
             return Ok((output, recurrent_state, profile));
         }
 
-        let query = query.reshape((
-            batch_size,
-            num_heads,
-            num_chunks,
-            chunk_size,
-            k_head_dim,
-        ))?;
-        let key = key.reshape((
-            batch_size,
-            num_heads,
-            num_chunks,
-            chunk_size,
-            k_head_dim,
-        ))?;
+        let query = query.reshape((batch_size, num_heads, num_chunks, chunk_size, k_head_dim))?;
+        let key = key.reshape((batch_size, num_heads, num_chunks, chunk_size, k_head_dim))?;
         let value = value.reshape((batch_size, num_heads, num_chunks, chunk_size, v_head_dim))?;
         let beta = beta.reshape((batch_size, num_heads, num_chunks, chunk_size))?;
         let g_raw = g.reshape((batch_size, num_heads, num_chunks, chunk_size))?;
@@ -4206,7 +4466,8 @@ impl GatedDeltaNet {
 
         let kv_append_start = profile_start(device)?;
         let mixed_qkv = if seq_len == 1 {
-            self.run_depthwise_conv_update(&mixed_qkv)?.transpose(1, 2)?
+            self.run_depthwise_conv_update(&mixed_qkv)?
+                .transpose(1, 2)?
         } else if use_linear_prefill_packed_kernel(device, seq_len) {
             self.run_depthwise_conv_packed_prefill(&mixed_qkv)?
         } else {

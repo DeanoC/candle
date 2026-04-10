@@ -42,6 +42,104 @@ template [[host_name("linear_prefill_conv_pack_f32")]] [[kernel]] decltype(linea
 template [[host_name("linear_prefill_conv_pack_bf16")]] [[kernel]] decltype(linear_prefill_conv_pack<bfloat, float>) linear_prefill_conv_pack<bfloat, float>;
 #endif
 
+template <typename T, typename AccumT, ushort MAX_HEAD_DIM = 128>
+kernel void full_attention_prefill(
+    constant size_t &batch_size,
+    constant size_t &q_heads,
+    constant size_t &kv_heads,
+    constant size_t &q_len,
+    constant size_t &kv_len,
+    constant size_t &head_dim,
+    constant size_t &num_kv_groups,
+    constant float &scale,
+    constant size_t &seqlen_offset,
+    device const T *query,
+    device const T *key,
+    device const T *value,
+    device T *out,
+    uint tid [[thread_position_in_grid]]
+) {
+    const size_t total_rows = batch_size * q_heads * q_len;
+    if (tid >= total_rows || head_dim > MAX_HEAD_DIM || kv_heads == 0 || num_kv_groups == 0) {
+        return;
+    }
+
+    const size_t rows_per_batch = q_heads * q_len;
+    const size_t b = tid / rows_per_batch;
+    const size_t row = tid - b * rows_per_batch;
+    const size_t q_head = row / q_len;
+    const size_t q_pos = row - q_head * q_len;
+    const size_t kv_head = min(q_head / num_kv_groups, kv_heads - 1);
+
+    const size_t query_row_offset =
+        ((b * q_heads + q_head) * q_len + q_pos) * head_dim;
+    const size_t key_head_offset = (b * kv_heads + kv_head) * kv_len * head_dim;
+    const size_t value_head_offset = key_head_offset;
+    const size_t out_row_offset =
+        ((b * q_heads + q_head) * q_len + q_pos) * head_dim;
+    const size_t causal_limit = min(kv_len, seqlen_offset + q_pos + 1);
+
+    AccumT q_row[MAX_HEAD_DIM];
+    AccumT out_row[MAX_HEAD_DIM];
+    for (size_t d = 0; d < head_dim; ++d) {
+        q_row[d] = AccumT(query[query_row_offset + d]);
+        out_row[d] = AccumT(0);
+    }
+    for (size_t d = head_dim; d < MAX_HEAD_DIM; ++d) {
+        out_row[d] = AccumT(0);
+    }
+
+    if (causal_limit == 0) {
+        for (size_t d = 0; d < head_dim; ++d) {
+            out[out_row_offset + d] = T(0);
+        }
+        return;
+    }
+
+    AccumT max_score = -INFINITY;
+    AccumT denom = AccumT(0);
+
+    for (size_t k_pos = 0; k_pos < causal_limit; ++k_pos) {
+        const size_t key_row_offset = key_head_offset + k_pos * head_dim;
+        const size_t value_row_offset = value_head_offset + k_pos * head_dim;
+        AccumT score = AccumT(0);
+        for (size_t d = 0; d < head_dim; ++d) {
+            score += q_row[d] * AccumT(key[key_row_offset + d]);
+        }
+        score *= AccumT(scale);
+
+        if (!isfinite(max_score)) {
+            max_score = score;
+            denom = AccumT(1);
+            for (size_t d = 0; d < head_dim; ++d) {
+                out_row[d] = AccumT(value[value_row_offset + d]);
+            }
+            continue;
+        }
+
+        const AccumT new_max = max(max_score, score);
+        const AccumT prev_scale = exp(max_score - new_max);
+        const AccumT curr_scale = exp(score - new_max);
+        denom = denom * prev_scale + curr_scale;
+        for (size_t d = 0; d < head_dim; ++d) {
+            out_row[d] =
+                out_row[d] * prev_scale + curr_scale * AccumT(value[value_row_offset + d]);
+        }
+        max_score = new_max;
+    }
+
+    const AccumT inv_denom = denom > AccumT(0) ? AccumT(1) / denom : AccumT(0);
+    for (size_t d = 0; d < head_dim; ++d) {
+        out[out_row_offset + d] = T(out_row[d] * inv_denom);
+    }
+}
+
+template [[host_name("full_attention_prefill_f16")]] [[kernel]] decltype(full_attention_prefill<half, float>) full_attention_prefill<half, float>;
+template [[host_name("full_attention_prefill_f32")]] [[kernel]] decltype(full_attention_prefill<float, float>) full_attention_prefill<float, float>;
+#if defined(__HAVE_BFLOAT__)
+template [[host_name("full_attention_prefill_bf16")]] [[kernel]] decltype(full_attention_prefill<bfloat, float>) full_attention_prefill<bfloat, float>;
+#endif
+
 template <typename T, typename AccumT>
 kernel void delta_state_update(
     constant size_t &batch_heads,
