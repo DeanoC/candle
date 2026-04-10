@@ -131,6 +131,32 @@ __global__ void candle_hip_where_cond_kernel(
     }
 }
 
+template <typename T>
+__global__ void candle_hip_cmp_kernel(
+    int op,
+    size_t elem_count,
+    const T *lhs,
+    const T *rhs,
+    uint8_t *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        const T l = lhs[tid];
+        const T r = rhs[tid];
+        bool out = false;
+        switch (op) {
+            case 0: out = l == r; break;
+            case 1: out = l != r; break;
+            case 2: out = l < r; break;
+            case 3: out = l <= r; break;
+            case 4: out = l > r; break;
+            case 5: out = l >= r; break;
+            default: out = false; break;
+        }
+        dst[tid] = static_cast<uint8_t>(out);
+    }
+}
+
 template <typename T, int BLOCK_SIZE = 256>
 __global__ void candle_hip_reduce_sum_kernel(
     size_t n_rows,

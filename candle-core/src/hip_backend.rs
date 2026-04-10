@@ -448,7 +448,47 @@ impl BackendStorage for HipStorage {
     }
 
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_layout: &Layout, rhs_layout: &Layout) -> Result<Self> {
-        self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.cmp(op, rhs, lhs_layout, rhs_layout))
+        let (Some((lhs_start, _)), Some((rhs_start, _))) =
+            (lhs_layout.contiguous_offsets(), rhs_layout.contiguous_offsets())
+        else {
+            return self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.cmp(op, rhs, lhs_layout, rhs_layout));
+        };
+        if lhs_layout.shape() != rhs_layout.shape() {
+            return self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.cmp(op, rhs, lhs_layout, rhs_layout));
+        }
+        let dtype = match self.dtype {
+            DType::F16 => 0,
+            DType::F32 => 1,
+            DType::BF16 => 2,
+            DType::U8 => 3,
+            DType::U32 => 4,
+            DType::I64 => 5,
+            _ => return self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.cmp(op, rhs, lhs_layout, rhs_layout)),
+        };
+        let op_code = match op {
+            CmpOp::Eq => 0,
+            CmpOp::Ne => 1,
+            CmpOp::Lt => 2,
+            CmpOp::Le => 3,
+            CmpOp::Gt => 4,
+            CmpOp::Ge => 5,
+        };
+        let output = Self::alloc_uninit(&self.device, lhs_layout.shape().elem_count(), DType::U8)?;
+        let status = unsafe {
+            ffi::candle_hip_cmp_contiguous(
+                op_code,
+                dtype,
+                self.device.ordinal,
+                lhs_layout.shape().elem_count(),
+                self.raw_device_ptr_with_offset(lhs_start)?,
+                rhs.raw_device_ptr_with_offset(rhs_start)?,
+                output.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(qwen35_error("hip-cmp", status));
+        }
+        Ok(output)
     }
 
     fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
@@ -1458,6 +1498,16 @@ pub mod ffi {
             n_rows: usize,
             n_cols: usize,
             src: *const c_void,
+            dst: *mut c_void,
+        ) -> c_int;
+
+        pub fn candle_hip_cmp_contiguous(
+            op: c_int,
+            dtype: c_int,
+            device_ordinal: usize,
+            elem_count: usize,
+            lhs: *const c_void,
+            rhs: *const c_void,
             dst: *mut c_void,
         ) -> c_int;
 

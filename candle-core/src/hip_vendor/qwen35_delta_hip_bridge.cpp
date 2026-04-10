@@ -271,6 +271,40 @@ int reduce_contiguous_device(
 }
 
 template <typename T>
+int cmp_contiguous_device(
+    int op,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* lhs,
+    const void* rhs,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(elem_count != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elem_count + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_cmp_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            op,
+            elem_count,
+            static_cast<const T*>(lhs),
+            static_cast<const T*>(rhs),
+            static_cast<uint8_t*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
 int rope_i_device(
     size_t device_ordinal,
     uint32_t bh,
@@ -2124,6 +2158,33 @@ extern "C" int candle_hip_reduce_contiguous(
             return reduce_contiguous_device<float>(op, device_ordinal, n_rows, n_cols, src, dst);
         case 2:
             return reduce_contiguous_device<hip_bfloat16>(op, device_ordinal, n_rows, n_cols, src, dst);
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_cmp_contiguous(
+    int op,
+    int dtype,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* lhs,
+    const void* rhs,
+    void* dst
+) {
+    switch(dtype) {
+        case 0:
+            return cmp_contiguous_device<half>(op, device_ordinal, elem_count, lhs, rhs, dst);
+        case 1:
+            return cmp_contiguous_device<float>(op, device_ordinal, elem_count, lhs, rhs, dst);
+        case 2:
+            return cmp_contiguous_device<hip_bfloat16>(op, device_ordinal, elem_count, lhs, rhs, dst);
+        case 3:
+            return cmp_contiguous_device<uint8_t>(op, device_ordinal, elem_count, lhs, rhs, dst);
+        case 4:
+            return cmp_contiguous_device<uint32_t>(op, device_ordinal, elem_count, lhs, rhs, dst);
+        case 5:
+            return cmp_contiguous_device<int64_t>(op, device_ordinal, elem_count, lhs, rhs, dst);
         default:
             return static_cast<int>(hipErrorInvalidValue);
     }

@@ -183,3 +183,34 @@ fn hip_reduce_max_last_dim_matches_cpu_without_host_staging() -> Result<()> {
     assert!(max_diff(&cpu_out, &hip_out)? < 1e-5);
     Ok(())
 }
+
+#[cfg(feature = "hip")]
+#[test]
+fn hip_cmp_matches_cpu_without_host_staging() -> Result<()> {
+    let _guard = HIP_TEST_LOCK.lock().unwrap();
+    let cpu = Device::Cpu;
+    let hip = Device::new_hip(0)?;
+
+    let lhs = Tensor::from_vec(
+        (0..12).map(|v| (v as f32 - 4.0) / 3.0).collect::<Vec<_>>(),
+        (3, 4),
+        &cpu,
+    )?;
+    let rhs = Tensor::from_vec(
+        (0..12).map(|v| (v as f32 - 5.0) / 4.0).collect::<Vec<_>>(),
+        (3, 4),
+        &cpu,
+    )?;
+    let cpu_out = lhs.gt(&rhs)?;
+
+    let lhs_hip = lhs.to_device(&hip)?;
+    let rhs_hip = rhs.to_device(&hip)?;
+    candle_core::hip::reset_transfer_counters();
+    let hip_out = lhs_hip.gt(&rhs_hip)?;
+    let counters = candle_core::hip::transfer_counters();
+
+    assert_eq!(counters.host_to_device_bytes, 0);
+    assert_eq!(counters.device_to_host_bytes, 0);
+    assert_eq!(cpu_out.to_vec2::<u8>()?, hip_out.to_vec2::<u8>()?);
+    Ok(())
+}
