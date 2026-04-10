@@ -537,7 +537,15 @@ fn use_delta_chunk_fused_kernel(
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
 ) -> bool {
-    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal) && sequence_length >= 4096) {
+    let scan_mode_supported = match device.location() {
+        DeviceLocation::Metal { .. } => matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal),
+        DeviceLocation::Cuda { .. } => matches!(
+            scan_mode,
+            DeltaNetScanMode::Flat3d | DeltaNetScanMode::PrebatchedLocal
+        ),
+        _ => false,
+    };
+    if !(scan_mode_supported && sequence_length >= 4096) {
         return false;
     }
 
@@ -5360,7 +5368,9 @@ impl GatedDeltaNet {
             k_cumdecay.reshape((batch_heads, num_chunks, chunk_size, k_head_dim))?;
         let q_state_scan = query_scan.broadcast_mul(&exp_g_scan.unsqueeze(D::Minus1)?)?;
         let (state_decay_scan, chunk_decay_scan) = match scan_mode {
-            DeltaNetScanMode::HoistedDecays | DeltaNetScanMode::PrebatchedLocal => {
+            DeltaNetScanMode::Flat3d
+            | DeltaNetScanMode::HoistedDecays
+            | DeltaNetScanMode::PrebatchedLocal => {
                 let exp_g_last_scan = exp_g_scan.i((.., .., chunk_size - 1))?;
                 (
                     Some(exp_g_last_scan.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?),
@@ -5372,7 +5382,7 @@ impl GatedDeltaNet {
                     ),
                 )
             }
-            DeltaNetScanMode::Flat3d | DeltaNetScanMode::TorchLike => (None, None),
+            DeltaNetScanMode::TorchLike => (None, None),
         };
         let local_attn_scan = match scan_mode {
             DeltaNetScanMode::PrebatchedLocal => Some(
