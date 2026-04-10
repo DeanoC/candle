@@ -48,6 +48,21 @@ __device__ inline hip_bfloat16 qwen35_from_float<hip_bfloat16>(float value) {
     return hip_bfloat16(value);
 }
 
+__device__ inline float qwen35_wave_sum(float value, int wave_size) {
+    for (int offset = wave_size / 2; offset > 0; offset /= 2) {
+        value += __shfl_down(value, offset, wave_size);
+    }
+    return __shfl(value, 0, wave_size);
+}
+
+__device__ inline unsigned int qwen35_wave_broadcast_u32(
+    unsigned int value,
+    int src_lane,
+    int wave_size
+) {
+    return __shfl(value, src_lane, wave_size);
+}
+
 template <typename T>
 __device__ inline void linear_prefill_conv_pack_impl(
     size_t batch_size,
@@ -173,6 +188,118 @@ __device__ inline void full_attention_prefill_impl(
     const float inv_denom = denom > 0.0f ? 1.0f / denom : 0.0f;
     for (size_t d = 0; d < head_dim; ++d) {
         out[out_row_offset + d] = qwen35_from_float<T>(out_row[d] * inv_denom);
+    }
+}
+
+template <typename T, int MAX_HEAD_DIM = 128>
+__device__ inline void full_attention_prefill_persistent_impl(
+    size_t batch_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t q_len,
+    size_t kv_len,
+    size_t head_dim,
+    size_t num_kv_groups,
+    float scale,
+    size_t seqlen_offset,
+    const T *query,
+    const T *key,
+    const T *value,
+    T *out,
+    unsigned int *row_counter
+) {
+    if (head_dim > static_cast<size_t>(MAX_HEAD_DIM) || kv_heads == 0 || num_kv_groups == 0) {
+        return;
+    }
+
+    constexpr int MAX_FRAGMENTS = (MAX_HEAD_DIM + 31) / 32;
+    const int wave_size = warpSize;
+    const int lane = static_cast<int>(threadIdx.x % wave_size);
+    const size_t total_rows = batch_size * q_heads * q_len;
+
+    for (;;) {
+        unsigned int row_idx = lane == 0 ? atomicAdd(row_counter, 1u) : 0u;
+        row_idx = qwen35_wave_broadcast_u32(row_idx, 0, wave_size);
+        const size_t tid = static_cast<size_t>(row_idx);
+        if (tid >= total_rows) {
+            return;
+        }
+
+        const size_t rows_per_batch = q_heads * q_len;
+        const size_t b = tid / rows_per_batch;
+        const size_t row = tid - b * rows_per_batch;
+        const size_t q_head = row / q_len;
+        const size_t q_pos = row - q_head * q_len;
+        size_t kv_head = q_head / num_kv_groups;
+        if (kv_head >= kv_heads) {
+            kv_head = kv_heads - 1;
+        }
+
+        const size_t query_row_offset = ((b * q_heads + q_head) * q_len + q_pos) * head_dim;
+        const size_t key_head_offset = (b * kv_heads + kv_head) * kv_len * head_dim;
+        const size_t value_head_offset = key_head_offset;
+        const size_t out_row_offset = ((b * q_heads + q_head) * q_len + q_pos) * head_dim;
+        const size_t causal_limit_candidate = seqlen_offset + q_pos + 1;
+        const size_t causal_limit = kv_len < causal_limit_candidate ? kv_len : causal_limit_candidate;
+
+        float q_fragments[MAX_FRAGMENTS];
+        float out_fragments[MAX_FRAGMENTS];
+        size_t d_fragments[MAX_FRAGMENTS];
+        int fragment_count = 0;
+        for (size_t d = static_cast<size_t>(lane); d < head_dim; d += static_cast<size_t>(wave_size)) {
+            d_fragments[fragment_count] = d;
+            q_fragments[fragment_count] = qwen35_to_float(query[query_row_offset + d]);
+            out_fragments[fragment_count] = 0.0f;
+            ++fragment_count;
+        }
+
+        if (causal_limit == 0) {
+            for (int fragment_idx = 0; fragment_idx < fragment_count; ++fragment_idx) {
+                out[out_row_offset + d_fragments[fragment_idx]] = qwen35_from_float<T>(0.0f);
+            }
+            continue;
+        }
+
+        float max_score = -INFINITY;
+        float denom = 0.0f;
+
+        for (size_t k_pos = 0; k_pos < causal_limit; ++k_pos) {
+            const size_t key_row_offset = key_head_offset + k_pos * head_dim;
+            const size_t value_row_offset = value_head_offset + k_pos * head_dim;
+            float partial_score = 0.0f;
+            for (int fragment_idx = 0; fragment_idx < fragment_count; ++fragment_idx) {
+                partial_score +=
+                    q_fragments[fragment_idx] * qwen35_to_float(key[key_row_offset + d_fragments[fragment_idx]]);
+            }
+            float score = qwen35_wave_sum(partial_score, wave_size) * scale;
+
+            if (!isfinite(max_score)) {
+                max_score = score;
+                denom = 1.0f;
+                for (int fragment_idx = 0; fragment_idx < fragment_count; ++fragment_idx) {
+                    out_fragments[fragment_idx] =
+                        qwen35_to_float(value[value_row_offset + d_fragments[fragment_idx]]);
+                }
+                continue;
+            }
+
+            const float new_max = max_score > score ? max_score : score;
+            const float prev_scale = expf(max_score - new_max);
+            const float curr_scale = expf(score - new_max);
+            denom = denom * prev_scale + curr_scale;
+            for (int fragment_idx = 0; fragment_idx < fragment_count; ++fragment_idx) {
+                out_fragments[fragment_idx] =
+                    out_fragments[fragment_idx] * prev_scale
+                    + curr_scale * qwen35_to_float(value[value_row_offset + d_fragments[fragment_idx]]);
+            }
+            max_score = new_max;
+        }
+
+        const float inv_denom = denom > 0.0f ? 1.0f / denom : 0.0f;
+        for (int fragment_idx = 0; fragment_idx < fragment_count; ++fragment_idx) {
+            out[out_row_offset + d_fragments[fragment_idx]] =
+                qwen35_from_float<T>(out_fragments[fragment_idx] * inv_denom);
+        }
     }
 }
 
@@ -624,6 +751,28 @@ extern "C" __global__ void name( \
         seqlen_offset, query, key, value, out, tid); \
 }
 
+#define DEFINE_FULL_ATTN_PREFILL_PERSISTENT_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t batch_size, \
+    size_t q_heads, \
+    size_t kv_heads, \
+    size_t q_len, \
+    size_t kv_len, \
+    size_t head_dim, \
+    size_t num_kv_groups, \
+    float scale, \
+    size_t seqlen_offset, \
+    const type *query, \
+    const type *key, \
+    const type *value, \
+    type *out, \
+    unsigned int *row_counter \
+) { \
+    full_attention_prefill_persistent_impl<type>( \
+        batch_size, q_heads, kv_heads, q_len, kv_len, head_dim, num_kv_groups, scale, \
+        seqlen_offset, query, key, value, out, row_counter); \
+}
+
 #define DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_heads, \
@@ -753,6 +902,10 @@ DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(linear_prefill_conv_pack_bf16, hip_bfloat
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_bf16, hip_bfloat16)
+
+DEFINE_FULL_ATTN_PREFILL_PERSISTENT_KERNEL(full_attention_prefill_persistent_f16, half)
+DEFINE_FULL_ATTN_PREFILL_PERSISTENT_KERNEL(full_attention_prefill_persistent_f32, float)
+DEFINE_FULL_ATTN_PREFILL_PERSISTENT_KERNEL(full_attention_prefill_persistent_bf16, hip_bfloat16)
 
 DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f16, half)
 DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f32, float)

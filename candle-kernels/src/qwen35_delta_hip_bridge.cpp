@@ -223,6 +223,116 @@ cleanup:
 }
 
 template <typename T, typename Kernel>
+int full_attention_prefill_persistent_host(
+    size_t device_ordinal,
+    size_t batch_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t q_len,
+    size_t kv_len,
+    size_t head_dim,
+    size_t num_kv_groups,
+    float scale,
+    size_t seqlen_offset,
+    const void* query_host,
+    const void* key_host,
+    const void* value_host,
+    void* out_host,
+    Kernel kernel
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+
+    const size_t query_elems = batch_size * q_heads * q_len * head_dim;
+    const size_t kv_elems = batch_size * kv_heads * kv_len * head_dim;
+    const size_t out_elems = query_elems;
+    const size_t query_bytes = query_elems * sizeof(T);
+    const size_t kv_bytes = kv_elems * sizeof(T);
+    const size_t out_bytes = out_elems * sizeof(T);
+
+    T* d_query = nullptr;
+    T* d_key = nullptr;
+    T* d_value = nullptr;
+    T* d_out = nullptr;
+    unsigned int* d_row_counter = nullptr;
+    err = hipSuccess;
+
+    hipDeviceProp_t props;
+    err = hipGetDeviceProperties(&props, static_cast<int>(device_ordinal));
+    if(err != hipSuccess) goto cleanup;
+
+    err = hipMalloc(reinterpret_cast<void**>(&d_query), query_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_key), kv_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_value), kv_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_out), out_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_row_counter), sizeof(unsigned int));
+    if(err != hipSuccess) goto cleanup;
+
+    err = hipMemcpy(d_query, query_host, query_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_key, key_host, kv_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_value, value_host, kv_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemset(d_row_counter, 0, sizeof(unsigned int));
+    if(err != hipSuccess) goto cleanup;
+
+    {
+        const int block = 256;
+        const int grid = props.multiProcessorCount > 0 ? props.multiProcessorCount : 1;
+        hipLaunchKernelGGL(
+            kernel,
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            batch_size,
+            q_heads,
+            kv_heads,
+            q_len,
+            kv_len,
+            head_dim,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+            d_query,
+            d_key,
+            d_value,
+            d_out,
+            d_row_counter
+        );
+    }
+    err = hipGetLastError();
+    if(err != hipSuccess) goto cleanup;
+    err = hipDeviceSynchronize();
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(out_host, d_out, out_bytes, hipMemcpyDeviceToHost);
+
+cleanup:
+    if(d_row_counter != nullptr) {
+        hipFree(d_row_counter);
+    }
+    if(d_out != nullptr) {
+        hipFree(d_out);
+    }
+    if(d_value != nullptr) {
+        hipFree(d_value);
+    }
+    if(d_key != nullptr) {
+        hipFree(d_key);
+    }
+    if(d_query != nullptr) {
+        hipFree(d_query);
+    }
+    return static_cast<int>(err);
+}
+
+template <typename T, typename Kernel>
 int delta_recurrent_prefill_host(
     size_t device_ordinal,
     size_t batch_heads,
@@ -996,6 +1106,83 @@ extern "C" int qwen35_hip_full_attention_prefill(
                 value,
                 out,
                 full_attention_prefill_bf16
+            );
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int qwen35_hip_full_attention_prefill_persistent(
+    int dtype,
+    size_t device_ordinal,
+    size_t batch_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t q_len,
+    size_t kv_len,
+    size_t head_dim,
+    size_t num_kv_groups,
+    float scale,
+    size_t seqlen_offset,
+    const void* query,
+    const void* key,
+    const void* value,
+    void* out
+) {
+    switch(dtype) {
+        case 0:
+            return full_attention_prefill_persistent_host<half>(
+                device_ordinal,
+                batch_size,
+                q_heads,
+                kv_heads,
+                q_len,
+                kv_len,
+                head_dim,
+                num_kv_groups,
+                scale,
+                seqlen_offset,
+                query,
+                key,
+                value,
+                out,
+                full_attention_prefill_persistent_f16
+            );
+        case 1:
+            return full_attention_prefill_persistent_host<float>(
+                device_ordinal,
+                batch_size,
+                q_heads,
+                kv_heads,
+                q_len,
+                kv_len,
+                head_dim,
+                num_kv_groups,
+                scale,
+                seqlen_offset,
+                query,
+                key,
+                value,
+                out,
+                full_attention_prefill_persistent_f32
+            );
+        case 2:
+            return full_attention_prefill_persistent_host<hip_bfloat16>(
+                device_ordinal,
+                batch_size,
+                q_heads,
+                kv_heads,
+                q_len,
+                kv_len,
+                head_dim,
+                num_kv_groups,
+                scale,
+                seqlen_offset,
+                query,
+                key,
+                value,
+                out,
+                full_attention_prefill_persistent_bf16
             );
         default:
             return static_cast<int>(hipErrorInvalidValue);

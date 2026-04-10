@@ -476,6 +476,24 @@ pub mod ffi {
             out: *mut c_void,
         ) -> c_int;
 
+        pub fn qwen35_hip_full_attention_prefill_persistent(
+            dtype: c_int,
+            device_ordinal: usize,
+            batch_size: usize,
+            q_heads: usize,
+            kv_heads: usize,
+            q_len: usize,
+            kv_len: usize,
+            head_dim: usize,
+            num_kv_groups: usize,
+            scale: f32,
+            seqlen_offset: usize,
+            query: *const c_void,
+            key: *const c_void,
+            value: *const c_void,
+            out: *mut c_void,
+        ) -> c_int;
+
         pub fn qwen35_hip_delta_recurrent_prefill(
             dtype: c_int,
             device_ordinal: usize,

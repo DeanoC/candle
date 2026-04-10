@@ -790,6 +790,13 @@ fn use_full_attention_prefill_megakernel(
     }
 }
 
+fn hip_persistent_full_attention_prefill_enabled() -> bool {
+    matches!(
+        std::env::var("CANDLE_QWEN35_HIP_PERSISTENT_FULL_PREFILL").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
 fn use_delta_chunk_scan_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
@@ -1417,6 +1424,7 @@ impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
         let out_shape =
             candle::Shape::from((self.batch_size, self.q_heads, self.q_len, self.head_dim));
         let elem_count = out_shape.elem_count();
+        let use_persistent = hip_persistent_full_attention_prefill_enabled();
 
         macro_rules! launch {
             ($ty:ty, $zero:expr) => {{
@@ -1449,23 +1457,43 @@ impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
                 };
                 let mut output = vec![$zero; elem_count];
                 let status = unsafe {
-                    candle::hip::ffi::qwen35_hip_full_attention_prefill(
-                        dtype_code,
-                        device.ordinal(),
-                        self.batch_size,
-                        self.q_heads,
-                        self.kv_heads,
-                        self.q_len,
-                        self.kv_len,
-                        self.head_dim,
-                        self.num_kv_groups,
-                        self.scale,
-                        self.seqlen_offset,
-                        query.as_ptr() as *const c_void,
-                        key.as_ptr() as *const c_void,
-                        value.as_ptr() as *const c_void,
-                        output.as_mut_ptr() as *mut c_void,
-                    )
+                    if use_persistent {
+                        candle::hip::ffi::qwen35_hip_full_attention_prefill_persistent(
+                            dtype_code,
+                            device.ordinal(),
+                            self.batch_size,
+                            self.q_heads,
+                            self.kv_heads,
+                            self.q_len,
+                            self.kv_len,
+                            self.head_dim,
+                            self.num_kv_groups,
+                            self.scale,
+                            self.seqlen_offset,
+                            query.as_ptr() as *const c_void,
+                            key.as_ptr() as *const c_void,
+                            value.as_ptr() as *const c_void,
+                            output.as_mut_ptr() as *mut c_void,
+                        )
+                    } else {
+                        candle::hip::ffi::qwen35_hip_full_attention_prefill(
+                            dtype_code,
+                            device.ordinal(),
+                            self.batch_size,
+                            self.q_heads,
+                            self.kv_heads,
+                            self.q_len,
+                            self.kv_len,
+                            self.head_dim,
+                            self.num_kv_groups,
+                            self.scale,
+                            self.seqlen_offset,
+                            query.as_ptr() as *const c_void,
+                            key.as_ptr() as *const c_void,
+                            value.as_ptr() as *const c_void,
+                            output.as_mut_ptr() as *mut c_void,
+                        )
+                    }
                 };
                 if status != 0 {
                     return Err(candle::hip::qwen35_error(self.name(), status));
@@ -7658,6 +7686,11 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "hip")]
+    use std::ffi::OsString;
+    #[cfg(feature = "hip")]
+    use std::sync::{Mutex, OnceLock};
+
+    #[cfg(feature = "hip")]
     fn assert_close(lhs: &[f32], rhs: &[f32], tol: f32) {
         assert_eq!(lhs.len(), rhs.len());
         for (idx, (lhs, rhs)) in lhs.iter().zip(rhs.iter()).enumerate() {
@@ -7670,56 +7703,54 @@ mod tests {
     }
 
     #[cfg(feature = "hip")]
-    #[test]
-    fn hip_linear_prefill_conv_pack_matches_reference() -> Result<()> {
-        let device = Device::new_hip(0)?;
-        let batch_size = 1usize;
-        let conv_dim = 2usize;
-        let total_len = 6usize;
-        let seq_len = 4usize;
-        let kernel_size = 3usize;
-
-        let mixed_qkv_data = vec![
-            0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, // channel 0
-            -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, // channel 1
-        ];
-        let weight_data = vec![
-            0.5f32, -0.25, 0.75, // channel 0
-            -0.4, 0.3, 0.2, // channel 1
-        ];
-        let mixed_qkv = Tensor::from_vec(
-            mixed_qkv_data.clone(),
-            (batch_size, conv_dim, total_len),
-            &device,
-        )?;
-        let weights = Tensor::from_vec(weight_data.clone(), (conv_dim, kernel_size), &device)?;
-        let output = linear_prefill_conv_pack(&mixed_qkv, &weights, seq_len, kernel_size)?;
-        let output = output.flatten_all()?.to_vec1::<f32>()?;
-
-        let mut expected = Vec::with_capacity(batch_size * seq_len * conv_dim);
-        for b in 0..batch_size {
-            for t in 0..seq_len {
-                for c in 0..conv_dim {
-                    let input_base = b * conv_dim * total_len + c * total_len;
-                    let weight_base = c * kernel_size;
-                    let mut acc = 0.0f32;
-                    for tap in 0..kernel_size {
-                        acc +=
-                            mixed_qkv_data[input_base + t + tap] * weight_data[weight_base + tap];
-                    }
-                    expected.push(acc / (1.0 + (-acc).exp()));
-                }
-            }
-        }
-
-        assert_close(&output, &expected, 1e-5);
-        Ok(())
+    fn hip_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[cfg(feature = "hip")]
-    #[test]
-    fn hip_full_attention_prefill_matches_reference() -> Result<()> {
-        let device = Device::new_hip(0)?;
+    struct HipPersistentPrefillEnvGuard {
+        saved: Option<OsString>,
+    }
+
+    #[cfg(feature = "hip")]
+    impl HipPersistentPrefillEnvGuard {
+        const KEY: &'static str = "CANDLE_QWEN35_HIP_PERSISTENT_FULL_PREFILL";
+
+        fn clear() -> Self {
+            let saved = std::env::var_os(Self::KEY);
+            unsafe {
+                std::env::remove_var(Self::KEY);
+            }
+            Self { saved }
+        }
+
+        fn set(value: &str) -> Self {
+            let saved = std::env::var_os(Self::KEY);
+            unsafe {
+                std::env::set_var(Self::KEY, value);
+            }
+            Self { saved }
+        }
+    }
+
+    #[cfg(feature = "hip")]
+    impl Drop for HipPersistentPrefillEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = self.saved.as_ref() {
+                    std::env::set_var(Self::KEY, value);
+                } else {
+                    std::env::remove_var(Self::KEY);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_full_attention_prefill_sample(
+        device: &Device,
+    ) -> Result<(Tensor, Tensor, Tensor, usize, f32, usize, Vec<f32>)> {
         let batch_size = 1usize;
         let q_heads = 2usize;
         let kv_heads = 1usize;
@@ -7731,8 +7762,8 @@ mod tests {
         let seqlen_offset = 2usize;
 
         let query_data = vec![
-            0.2f32, 0.0, 0.1, -0.1, 0.1, 0.3, -0.2, 0.0, 0.4, -0.1, 0.0, 0.2, // head 0
-            -0.2, 0.1, 0.0, 0.3, 0.2, -0.3, 0.1, 0.0, 0.0, 0.2, 0.2, -0.1, // head 1
+            0.2f32, 0.0, 0.1, -0.1, 0.1, 0.3, -0.2, 0.0, 0.4, -0.1, 0.0, 0.2, -0.2, 0.1, 0.0, 0.3,
+            0.2, -0.3, 0.1, 0.0, 0.0, 0.2, 0.2, -0.1,
         ];
         let key_data = vec![
             0.1f32, 0.0, 0.2, -0.1, 0.0, 0.3, -0.2, 0.1, 0.2, -0.1, 0.0, 0.4, -0.3, 0.2, 0.1, 0.0,
@@ -7746,27 +7777,18 @@ mod tests {
         let query = Tensor::from_vec(
             query_data.clone(),
             (batch_size, q_heads, q_len, head_dim),
-            &device,
+            device,
         )?;
         let key = Tensor::from_vec(
             key_data.clone(),
             (batch_size, kv_heads, kv_len, head_dim),
-            &device,
+            device,
         )?;
         let value = Tensor::from_vec(
             value_data.clone(),
             (batch_size, kv_heads, kv_len, head_dim),
-            &device,
+            device,
         )?;
-        let output = full_attention_prefill_megakernel(
-            &query,
-            &key,
-            &value,
-            num_kv_groups,
-            scale,
-            seqlen_offset,
-        )?;
-        let output = output.flatten_all()?.to_vec1::<f32>()?;
 
         let mut expected = Vec::with_capacity(batch_size * q_heads * q_len * head_dim);
         for b in 0..batch_size {
@@ -7819,7 +7841,142 @@ mod tests {
             }
         }
 
+        Ok((
+            query,
+            key,
+            value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+            expected,
+        ))
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_linear_prefill_conv_pack_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_size = 1usize;
+        let conv_dim = 2usize;
+        let total_len = 6usize;
+        let seq_len = 4usize;
+        let kernel_size = 3usize;
+
+        let mixed_qkv_data = vec![
+            0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, // channel 0
+            -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, // channel 1
+        ];
+        let weight_data = vec![
+            0.5f32, -0.25, 0.75, // channel 0
+            -0.4, 0.3, 0.2, // channel 1
+        ];
+        let mixed_qkv = Tensor::from_vec(
+            mixed_qkv_data.clone(),
+            (batch_size, conv_dim, total_len),
+            &device,
+        )?;
+        let weights = Tensor::from_vec(weight_data.clone(), (conv_dim, kernel_size), &device)?;
+        let output = linear_prefill_conv_pack(&mixed_qkv, &weights, seq_len, kernel_size)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = Vec::with_capacity(batch_size * seq_len * conv_dim);
+        for b in 0..batch_size {
+            for t in 0..seq_len {
+                for c in 0..conv_dim {
+                    let input_base = b * conv_dim * total_len + c * total_len;
+                    let weight_base = c * kernel_size;
+                    let mut acc = 0.0f32;
+                    for tap in 0..kernel_size {
+                        acc +=
+                            mixed_qkv_data[input_base + t + tap] * weight_data[weight_base + tap];
+                    }
+                    expected.push(acc / (1.0 + (-acc).exp()));
+                }
+            }
+        }
+
         assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_full_attention_prefill_matches_reference() -> Result<()> {
+        let _env_lock = hip_env_lock().lock().unwrap();
+        let _env_guard = HipPersistentPrefillEnvGuard::clear();
+        let device = Device::new_hip(0)?;
+        let (query, key, value, num_kv_groups, scale, seqlen_offset, expected) =
+            hip_full_attention_prefill_sample(&device)?;
+        let output = full_attention_prefill_megakernel(
+            &query,
+            &key,
+            &value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+        )?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_full_attention_prefill_persistent_matches_reference() -> Result<()> {
+        let _env_lock = hip_env_lock().lock().unwrap();
+        let _env_guard = HipPersistentPrefillEnvGuard::set("1");
+        let device = Device::new_hip(0)?;
+        let (query, key, value, num_kv_groups, scale, seqlen_offset, expected) =
+            hip_full_attention_prefill_sample(&device)?;
+        let output = full_attention_prefill_megakernel(
+            &query,
+            &key,
+            &value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+        )?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_full_attention_prefill_persistent_matches_legacy() -> Result<()> {
+        let _env_lock = hip_env_lock().lock().unwrap();
+        let device = Device::new_hip(0)?;
+        let (query, key, value, num_kv_groups, scale, seqlen_offset, _) =
+            hip_full_attention_prefill_sample(&device)?;
+
+        let _legacy_env_guard = HipPersistentPrefillEnvGuard::clear();
+        let legacy = full_attention_prefill_megakernel(
+            &query,
+            &key,
+            &value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+        )?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        drop(_legacy_env_guard);
+
+        let _persistent_env_guard = HipPersistentPrefillEnvGuard::set("1");
+        let persistent = full_attention_prefill_megakernel(
+            &query,
+            &key,
+            &value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+        )?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+        assert_close(&legacy, &persistent, 1e-5);
         Ok(())
     }
 
