@@ -307,6 +307,46 @@ pub struct LinearAttentionTrace {
     pub profile: RuntimeProfile,
 }
 
+pub struct ExternalFullAttentionOutput {
+    pub attn_output: Tensor,
+    pub profile: RuntimeProfile,
+}
+
+pub trait ExternalFullAttention {
+    fn forward(
+        &mut self,
+        layer_id: usize,
+        query_states: &Tensor,
+        key_states: &Tensor,
+        value_states: &Tensor,
+        num_kv_groups: usize,
+        head_dim: usize,
+        seqlen_offset: usize,
+    ) -> Result<ExternalFullAttentionOutput>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FullAttentionCacheState {
+    pub kv_cache: Option<(Tensor, Tensor)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LinearAttentionCacheState {
+    pub conv_state: Option<Tensor>,
+    pub recurrent_state: Option<Tensor>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LayerCacheState {
+    Linear(LinearAttentionCacheState),
+    Full(FullAttentionCacheState),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CacheState {
+    pub layers: Vec<LayerCacheState>,
+}
+
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     cos: Tensor,
@@ -5055,6 +5095,16 @@ struct FullAttention {
 }
 
 impl FullAttention {
+    fn cache_state(&self) -> FullAttentionCacheState {
+        FullAttentionCacheState {
+            kv_cache: self.kv_cache.clone(),
+        }
+    }
+
+    fn restore_cache_state(&mut self, state: &FullAttentionCacheState) {
+        self.kv_cache = state.kv_cache.clone();
+    }
+
     fn causal_block_mask(
         device: &Device,
         q_start: usize,
@@ -5334,11 +5384,13 @@ impl FullAttention {
         })
     }
 
-    fn forward_profiled(
+    fn forward_profiled_with_external(
         &mut self,
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
+        layer_id: usize,
+        external_full_attention: &mut Option<&mut dyn ExternalFullAttention>,
     ) -> Result<(Tensor, RuntimeProfile)> {
         let device = xs.device();
         let full_start = profile_start(device)?;
@@ -5378,7 +5430,7 @@ impl FullAttention {
 
         let kv_append_start = profile_start(device)?;
         let (key_states, value_states) = match &self.kv_cache {
-            Some((prev_k, prev_v)) => {
+            Some((prev_k, prev_v)) if external_full_attention.is_none() => {
                 let prev_k = if prev_k.dtype() == key_states.dtype() {
                     prev_k.clone()
                 } else {
@@ -5394,7 +5446,7 @@ impl FullAttention {
                     Tensor::cat(&[&prev_v, &value_states], 2)?,
                 )
             }
-            None => (key_states, value_states),
+            _ => (key_states, value_states),
         };
         profile.kv_append_write_millis += profile_elapsed(kv_append_start, device)?;
 
@@ -5407,7 +5459,24 @@ impl FullAttention {
         profile.layout_prepare_millis += input_layout_elapsed;
         profile.full_attention_input_layout_millis += input_layout_elapsed;
 
-        let attn_output = if use_full_attention_prefill_megakernel(
+        let attn_output = if let Some(handler) = external_full_attention.as_deref_mut() {
+            let external_started = profile_start(device)?;
+            let external = handler.forward(
+                layer_id,
+                &query_states,
+                &key_states,
+                &value_states,
+                self.num_kv_groups,
+                self.head_dim,
+                seqlen_offset,
+            )?;
+            let external_elapsed = profile_elapsed(external_started, device)?;
+            profile.add_assign(&external.profile);
+            if external.profile.full_attention_millis == 0.0 {
+                profile.full_attention_millis += external_elapsed;
+            }
+            external.attn_output
+        } else if use_full_attention_prefill_megakernel(
             device,
             q_len,
             key_states.dim(2)?,
@@ -5509,7 +5578,9 @@ impl FullAttention {
             .to_dtype(xs.dtype())?;
         profile.full_attention_output_reshape_millis +=
             profile_elapsed(output_reshape_start, device)?;
-        self.kv_cache = Some((key_states, value_states));
+        if external_full_attention.is_none() {
+            self.kv_cache = Some((key_states, value_states));
+        }
         let gate_start = profile_start(device)?;
         let gated = attn_output.broadcast_mul(&ops::sigmoid(&gate)?)?;
         profile.full_attention_gate_millis += profile_elapsed(gate_start, device)?;
@@ -5518,6 +5589,22 @@ impl FullAttention {
         profile.output_projection_millis += profile_elapsed(output_start, device)?;
         profile.full_attention_millis += profile_elapsed(full_start, device)?;
         Ok((output, profile))
+    }
+
+    fn forward_profiled(
+        &mut self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        seqlen_offset: usize,
+    ) -> Result<(Tensor, RuntimeProfile)> {
+        let mut no_external = None;
+        self.forward_profiled_with_external(
+            xs,
+            attention_mask,
+            seqlen_offset,
+            usize::MAX,
+            &mut no_external,
+        )
     }
 
     #[allow(dead_code)]
@@ -5580,6 +5667,18 @@ struct LinearValueCache {
 }
 
 impl GatedDeltaNet {
+    fn cache_state(&self) -> LinearAttentionCacheState {
+        LinearAttentionCacheState {
+            conv_state: self.conv_state.clone(),
+            recurrent_state: self.recurrent_state.clone(),
+        }
+    }
+
+    fn restore_cache_state(&mut self, state: &LinearAttentionCacheState) {
+        self.conv_state = state.conv_state.clone();
+        self.recurrent_state = state.recurrent_state.clone();
+    }
+
     fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
         let key_dim = cfg.linear_num_key_heads * cfg.linear_key_head_dim;
         let value_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim;
@@ -6941,11 +7040,13 @@ impl DecoderLayer {
         })
     }
 
-    fn forward_profiled(
+    fn forward_profiled_with_external(
         &mut self,
+        layer_id: usize,
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
         seqlen_offset: usize,
+        external_full_attention: &mut Option<&mut dyn ExternalFullAttention>,
     ) -> Result<(Tensor, RuntimeProfile)> {
         let device = xs.device();
         let mut profile = RuntimeProfile::default();
@@ -6958,8 +7059,13 @@ impl DecoderLayer {
                 xs
             }
             LayerKind::Full(self_attn) => {
-                let (xs, layer_profile) =
-                    self_attn.forward_profiled(&xs_norm, attention_mask, seqlen_offset)?;
+                let (xs, layer_profile) = self_attn.forward_profiled_with_external(
+                    &xs_norm,
+                    attention_mask,
+                    seqlen_offset,
+                    layer_id,
+                    external_full_attention,
+                )?;
                 profile.add_assign(&layer_profile);
                 xs
             }
@@ -6971,6 +7077,22 @@ impl DecoderLayer {
         let xs = self.mlp.forward(&xs)?;
         profile.mlp_millis += profile_elapsed(mlp_start, device)?;
         Ok((residual.broadcast_add(&xs)?, profile))
+    }
+
+    fn forward_profiled(
+        &mut self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        seqlen_offset: usize,
+    ) -> Result<(Tensor, RuntimeProfile)> {
+        let mut no_external = None;
+        self.forward_profiled_with_external(
+            usize::MAX,
+            xs,
+            attention_mask,
+            seqlen_offset,
+            &mut no_external,
+        )
     }
 
     #[allow(dead_code)]
@@ -6988,6 +7110,32 @@ impl DecoderLayer {
         match &mut self.token_mixer {
             LayerKind::Linear(linear_attn) => linear_attn.clear_kv_cache(),
             LayerKind::Full(self_attn) => self_attn.clear_kv_cache(),
+        }
+    }
+
+    fn cache_state(&self) -> LayerCacheState {
+        match &self.token_mixer {
+            LayerKind::Linear(linear_attn) => LayerCacheState::Linear(linear_attn.cache_state()),
+            LayerKind::Full(self_attn) => LayerCacheState::Full(self_attn.cache_state()),
+        }
+    }
+
+    fn restore_cache_state(&mut self, state: &LayerCacheState) -> Result<()> {
+        match (&mut self.token_mixer, state) {
+            (LayerKind::Linear(linear_attn), LayerCacheState::Linear(state)) => {
+                linear_attn.restore_cache_state(state);
+                Ok(())
+            }
+            (LayerKind::Full(self_attn), LayerCacheState::Full(state)) => {
+                self_attn.restore_cache_state(state);
+                Ok(())
+            }
+            (LayerKind::Linear(_), LayerCacheState::Full(_)) => {
+                candle::bail!("cannot restore full-attention cache into linear-attention layer")
+            }
+            (LayerKind::Full(_), LayerCacheState::Linear(_)) => {
+                candle::bail!("cannot restore linear-attention cache into full-attention layer")
+            }
         }
     }
 
@@ -7056,6 +7204,16 @@ impl TextModel {
             .enumerate()
             .filter_map(|(layer_id, layer)| {
                 (layer.layer_type() == "linear_attention").then_some(layer_id)
+            })
+            .collect()
+    }
+
+    pub fn full_attention_layer_ids(&self) -> Vec<usize> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(layer_id, layer)| {
+                (layer.layer_type() == "full_attention").then_some(layer_id)
             })
             .collect()
     }
@@ -7261,6 +7419,43 @@ impl TextModel {
         Ok((self.norm.forward(&xs)?, traces, profile))
     }
 
+    pub fn forward_profiled_with_external_full_attention(
+        &mut self,
+        input_ids: &Tensor,
+        seqlen_offset: usize,
+        external_full_attention: &mut dyn ExternalFullAttention,
+    ) -> Result<(Tensor, RuntimeProfile)> {
+        let device = input_ids.device();
+        let (b_size, seq_len) = input_ids.dims2()?;
+        let mut profile = RuntimeProfile::default();
+        let scheduler_start = profile_start(device)?;
+        let attention_mask = if seq_len > 1 {
+            Some(self.prepare_causal_attention_mask(b_size, seq_len, seqlen_offset)?)
+        } else {
+            None
+        };
+        profile.scheduler_planning_millis += profile_elapsed(scheduler_start, device)?;
+        let mut xs = self.embed_tokens.forward(input_ids)?;
+        let mut external = Some(external_full_attention);
+        for (layer_id, layer) in self.layers.iter_mut().enumerate() {
+            let mask = if layer.layer_type() == "full_attention" {
+                attention_mask.as_ref()
+            } else {
+                None
+            };
+            let (next_xs, layer_profile) = layer.forward_profiled_with_external(
+                layer_id,
+                &xs,
+                mask,
+                seqlen_offset,
+                &mut external,
+            )?;
+            profile.add_assign(&layer_profile);
+            xs = next_xs;
+        }
+        Ok((self.norm.forward(&xs)?, profile))
+    }
+
     pub fn forward_profiled(
         &mut self,
         input_ids: &Tensor,
@@ -7300,6 +7495,26 @@ impl TextModel {
             layer.clear_kv_cache();
         }
     }
+
+    pub fn cache_state(&self) -> CacheState {
+        CacheState {
+            layers: self.layers.iter().map(DecoderLayer::cache_state).collect(),
+        }
+    }
+
+    pub fn restore_cache_state(&mut self, state: &CacheState) -> Result<()> {
+        if state.layers.len() != self.layers.len() {
+            candle::bail!(
+                "cache state layer count mismatch: model={} state={}",
+                self.layers.len(),
+                state.layers.len()
+            );
+        }
+        for (layer, layer_state) in self.layers.iter_mut().zip(state.layers.iter()) {
+            layer.restore_cache_state(layer_state)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -7325,6 +7540,29 @@ impl ModelForCausalLM {
             language_model,
             lm_head,
         })
+    }
+
+    pub fn forward_profiled_with_external_full_attention(
+        &mut self,
+        input_ids: &Tensor,
+        seqlen_offset: usize,
+        external_full_attention: &mut dyn ExternalFullAttention,
+    ) -> Result<(Tensor, RuntimeProfile)> {
+        let device = input_ids.device();
+        let (_, seq_len) = input_ids.dims2()?;
+        let (hidden_states, mut profile) = self
+            .language_model
+            .forward_profiled_with_external_full_attention(
+                input_ids,
+                seqlen_offset,
+                external_full_attention,
+            )?;
+        let output_start = profile_start(device)?;
+        let logits = hidden_states
+            .narrow(1, seq_len - 1, 1)?
+            .apply(&self.lm_head)?;
+        profile.output_projection_millis += profile_elapsed(output_start, device)?;
+        Ok((logits, profile))
     }
 
     pub fn forward_profiled(
@@ -7373,6 +7611,10 @@ impl ModelForCausalLM {
         self.language_model.linear_attention_layer_ids()
     }
 
+    pub fn full_attention_layer_ids(&self) -> Vec<usize> {
+        self.language_model.full_attention_layer_ids()
+    }
+
     pub fn bench_linear_attention_layer(
         &mut self,
         input_ids: &Tensor,
@@ -7400,6 +7642,14 @@ impl ModelForCausalLM {
 
     pub fn clear_kv_cache(&mut self) {
         self.language_model.clear_kv_cache()
+    }
+
+    pub fn cache_state(&self) -> CacheState {
+        self.language_model.cache_state()
+    }
+
+    pub fn restore_cache_state(&mut self, state: &CacheState) -> Result<()> {
+        self.language_model.restore_cache_state(state)
     }
 }
 
