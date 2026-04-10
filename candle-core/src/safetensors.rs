@@ -258,6 +258,9 @@ impl Tensor {
                     Device::Cuda(_) => {
                         return Err(Error::Msg("CUDA support not compiled".to_string()));
                     }
+                    Device::Hip(_) => {
+                        return Err(Error::Msg("HIP support not compiled".to_string()));
+                    }
                     #[cfg(feature = "metal")]
                     Device::Metal(device) => {
                         let buffer = device.new_buffer_with_data(data)?;
@@ -357,6 +360,9 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => {
             return Err(Error::Msg("CUDA support not compiled".to_string()));
+        }
+        Device::Hip(_) => {
+            return Err(Error::Msg("HIP support not compiled".to_string()));
         }
         #[cfg(feature = "metal")]
         Device::Metal(device) => {

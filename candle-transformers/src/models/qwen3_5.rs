@@ -12,7 +12,7 @@ fn elapsed_millis(start: Instant) -> f64 {
 fn profile_sync_enabled(device: &Device) -> bool {
     matches!(
         device.location(),
-        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. }
+        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. }
     ) && matches!(
         std::env::var("CANDLE_QWEN35_PROFILE_SYNC").as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES")
@@ -519,13 +519,19 @@ fn use_delta_state_scan_kernel(
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
 ) -> bool {
-    matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
-        && sequence_length >= 4096
-        && matches!(
-            std::env::var("CANDLE_QWEN35_DELTA_STATE_SCAN_KERNEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal) && sequence_length >= 4096) {
+        return false;
+    }
+
+    match device.location() {
+        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => {
+            matches!(
+                std::env::var("CANDLE_QWEN35_DELTA_STATE_SCAN_KERNEL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        }
+        _ => false,
+    }
 }
 
 fn use_delta_chunk_fused_kernel(
@@ -533,13 +539,19 @@ fn use_delta_chunk_fused_kernel(
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
 ) -> bool {
-    matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
-        && sequence_length >= 4096
-        && matches!(
-            std::env::var("CANDLE_QWEN35_DELTA_CHUNK_FUSED_KERNEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal) && sequence_length >= 4096) {
+        return false;
+    }
+
+    match device.location() {
+        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => {
+            matches!(
+                std::env::var("CANDLE_QWEN35_DELTA_CHUNK_FUSED_KERNEL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        }
+        _ => false,
+    }
 }
 
 fn use_delta_full_scan_kernel(
@@ -547,22 +559,32 @@ fn use_delta_full_scan_kernel(
     scan_mode: DeltaNetScanMode,
     sequence_length: usize,
 ) -> bool {
-    matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
-        && sequence_length >= 4096
-        && matches!(
-            std::env::var("CANDLE_QWEN35_DELTA_FULL_KERNEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal) && sequence_length >= 4096) {
+        return false;
+    }
+
+    match device.location() {
+        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => {
+            matches!(
+                std::env::var("CANDLE_QWEN35_DELTA_FULL_KERNEL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        }
+        _ => false,
+    }
 }
 
 fn use_delta_recurrent_prefill_kernel(device: &Device, sequence_length: usize) -> bool {
-    matches!(device.location(), DeviceLocation::Metal { .. })
-        && sequence_length >= 4096
-        && matches!(
-            std::env::var("CANDLE_QWEN35_DELTA_RECURRENT_PREFILL_KERNEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+    sequence_length >= 4096
+        && match device.location() {
+            DeviceLocation::Metal { .. }
+            | DeviceLocation::Cuda { .. }
+            | DeviceLocation::Hip { .. } => matches!(
+                std::env::var("CANDLE_QWEN35_DELTA_RECURRENT_PREFILL_KERNEL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            ),
+            _ => false,
+        }
 }
 
 fn use_delta_chunk_step_kernel(
@@ -571,25 +593,33 @@ fn use_delta_chunk_step_kernel(
     sequence_length: usize,
     chunk_size: usize,
 ) -> bool {
-    if !(matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
         && sequence_length >= 2048
         && chunk_size <= 24)
     {
         return false;
     }
 
-    match std::env::var("CANDLE_QWEN35_DELTA_CHUNK_STEP_KERNEL") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
-            ) =>
-        {
-            false
+    match device.location() {
+        DeviceLocation::Metal { .. } => {
+            match std::env::var("CANDLE_QWEN35_DELTA_CHUNK_STEP_KERNEL") {
+                Ok(value)
+                    if matches!(
+                        value.as_str(),
+                        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+                    ) =>
+                {
+                    false
+                }
+                Ok(_) => true,
+                Err(_) => true,
+            }
         }
-        Ok(_) => true,
-        Err(_) => true,
+        DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_DELTA_CHUNK_STEP_KERNEL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        _ => false,
     }
 }
 
@@ -621,44 +651,65 @@ fn use_delta_chunk_windowed_kernel(
     sequence_length: usize,
     chunk_size: usize,
 ) -> bool {
-    if !(matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
         && sequence_length >= 2048
         && chunk_size <= 24)
     {
         return false;
     }
 
-    match std::env::var("CANDLE_QWEN35_DELTA_CHUNK_WINDOWED_KERNEL") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
-            ) =>
-        {
-            false
+    match device.location() {
+        DeviceLocation::Metal { .. } => {
+            match std::env::var("CANDLE_QWEN35_DELTA_CHUNK_WINDOWED_KERNEL") {
+                Ok(value)
+                    if matches!(
+                        value.as_str(),
+                        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+                    ) =>
+                {
+                    false
+                }
+                Ok(_) => true,
+                Err(_) => true,
+            }
         }
-        Ok(_) => true,
-        Err(_) => true,
+        DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_DELTA_CHUNK_WINDOWED_KERNEL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        _ => false,
     }
 }
 
 fn use_linear_prefill_packed_kernel(device: &Device, sequence_length: usize) -> bool {
-    if !(matches!(device.location(), DeviceLocation::Metal { .. }) && sequence_length >= 2048) {
+    if sequence_length < 2048 {
         return false;
     }
 
-    match std::env::var("CANDLE_QWEN35_LINEAR_PACKED_PREFILL") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
-            ) =>
-        {
-            false
+    match device.location() {
+        DeviceLocation::Metal { .. } => {
+            match std::env::var("CANDLE_QWEN35_LINEAR_PACKED_PREFILL") {
+                Ok(value)
+                    if matches!(
+                        value.as_str(),
+                        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+                    ) =>
+                {
+                    false
+                }
+                Ok(_) => true,
+                Err(_) => true,
+            }
         }
-        Ok(_) => true,
-        Err(_) => true,
+        DeviceLocation::Cuda { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_LINEAR_PACKED_PREFILL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        DeviceLocation::Hip { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_LINEAR_PACKED_PREFILL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        _ => false,
     }
 }
 
@@ -668,24 +719,34 @@ fn use_full_attention_prefill_megakernel(
     kv_len: usize,
     seqlen_offset: usize,
 ) -> bool {
-    if !(matches!(device.location(), DeviceLocation::Metal { .. })
-        && q_len >= 2048
-        && kv_len == q_len + seqlen_offset)
-    {
+    if q_len < 2048 || kv_len != q_len + seqlen_offset {
         return false;
     }
 
-    match std::env::var("CANDLE_QWEN35_FULL_PREFILL_MEGAKERNEL") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
-            ) =>
-        {
-            false
+    match device.location() {
+        DeviceLocation::Metal { .. } => {
+            match std::env::var("CANDLE_QWEN35_FULL_PREFILL_MEGAKERNEL") {
+                Ok(value)
+                    if matches!(
+                        value.as_str(),
+                        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+                    ) =>
+                {
+                    false
+                }
+                Ok(_) => true,
+                Err(_) => true,
+            }
         }
-        Ok(_) => true,
-        Err(_) => true,
+        DeviceLocation::Cuda { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_FULL_PREFILL_MEGAKERNEL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        DeviceLocation::Hip { .. } => matches!(
+            std::env::var("CANDLE_QWEN35_FULL_PREFILL_MEGAKERNEL").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        ),
+        _ => false,
     }
 }
 
@@ -695,14 +756,22 @@ fn use_delta_chunk_scan_kernel(
     sequence_length: usize,
     chunk_size: usize,
 ) -> bool {
-    matches!(device.location(), DeviceLocation::Metal { .. })
-        && matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
+    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
         && sequence_length >= 4096
-        && chunk_size <= 16
-        && matches!(
-            std::env::var("CANDLE_QWEN35_DELTA_CHUNK_SCAN_KERNEL").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+        && chunk_size <= 16)
+    {
+        return false;
+    }
+
+    match device.location() {
+        DeviceLocation::Metal { .. } | DeviceLocation::Cuda { .. } | DeviceLocation::Hip { .. } => {
+            matches!(
+                std::env::var("CANDLE_QWEN35_DELTA_CHUNK_SCAN_KERNEL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+            )
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -727,6 +796,95 @@ impl candle::CustomOp2 for LinearPrefillConvPack {
         _l2: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("linear-prefill-conv-pack has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        mixed_qkv: &candle::CudaStorage,
+        mixed_qkv_layout: &candle::Layout,
+        weights: &candle::CudaStorage,
+        weights_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(mixed_qkv_layout.is_contiguous() && weights_layout.is_contiguous()) {
+            candle::bail!("linear-prefill-conv-pack requires contiguous inputs")
+        }
+
+        let (batch_size, conv_dim, total_len) = mixed_qkv_layout.shape().dims3()?;
+        let (weights_conv_dim, kernel_size) = weights_layout.shape().dims2()?;
+        if batch_size != self.batch_size
+            || conv_dim != self.conv_dim
+            || total_len != self.total_len
+            || weights_conv_dim != self.conv_dim
+            || kernel_size != self.kernel_size
+        {
+            candle::bail!(
+                "linear-prefill-conv-pack shape mismatch: mixed_qkv={:?} weights={:?} expected=({}, {}, {}, {})",
+                mixed_qkv_layout.shape().dims(),
+                weights_layout.shape().dims(),
+                self.batch_size,
+                self.conv_dim,
+                self.total_len,
+                self.kernel_size
+            )
+        }
+        if total_len < self.seq_len + self.kernel_size.saturating_sub(1) {
+            candle::bail!(
+                "linear-prefill-conv-pack total_len {} too small for seq_len {} kernel {}",
+                total_len,
+                self.seq_len,
+                self.kernel_size
+            )
+        }
+
+        let device = mixed_qkv.device().clone();
+        let output_shape = candle::Shape::from((self.batch_size, self.seq_len, self.conv_dim));
+        let elem_count = output_shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let mixed_qkv = mixed_qkv.as_cuda_slice::<$ty>()?;
+                let mixed_qkv = match mixed_qkv_layout.contiguous_offsets() {
+                    Some((o1, o2)) => mixed_qkv.slice(o1..o2),
+                    None => candle::bail!("linear-prefill-conv-pack requires contiguous inputs"),
+                };
+                let weights = weights.as_cuda_slice::<$ty>()?;
+                let weights = match weights_layout.contiguous_offsets() {
+                    Some((o1, o2)) => weights.slice(o1..o2),
+                    None => candle::bail!("linear-prefill-conv-pack requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    self.batch_size,
+                    self.conv_dim,
+                    self.total_len,
+                    self.seq_len,
+                    self.kernel_size
+                );
+                builder.arg(&mixed_qkv);
+                builder.arg(&weights);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, output_shape.clone()))
+            }};
+        }
+
+        match mixed_qkv.dtype() {
+            DType::F16 => launch!(half::f16, "linear_prefill_conv_pack_f16"),
+            DType::F32 => launch!(f32, "linear_prefill_conv_pack_f32"),
+            DType::BF16 => launch!(half::bf16, "linear_prefill_conv_pack_bf16"),
+            other => candle::bail!("linear-prefill-conv-pack unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -810,6 +968,100 @@ impl candle::CustomOp2 for LinearPrefillConvPack {
         let storage = candle::MetalStorage::new(output, device.clone(), elem_count, storage_dtype);
         Ok((storage, output_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        mixed_qkv: &candle::HipStorage,
+        mixed_qkv_layout: &candle::Layout,
+        weights: &candle::HipStorage,
+        weights_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(mixed_qkv_layout.is_contiguous() && weights_layout.is_contiguous()) {
+            candle::bail!("linear-prefill-conv-pack requires contiguous inputs")
+        }
+
+        let (batch_size, conv_dim, total_len) = mixed_qkv_layout.shape().dims3()?;
+        let (weights_conv_dim, kernel_size) = weights_layout.shape().dims2()?;
+        if batch_size != self.batch_size
+            || conv_dim != self.conv_dim
+            || total_len != self.total_len
+            || weights_conv_dim != self.conv_dim
+            || kernel_size != self.kernel_size
+        {
+            candle::bail!(
+                "linear-prefill-conv-pack shape mismatch: mixed_qkv={:?} weights={:?} expected=({}, {}, {}, {})",
+                mixed_qkv_layout.shape().dims(),
+                weights_layout.shape().dims(),
+                self.batch_size,
+                self.conv_dim,
+                self.total_len,
+                self.kernel_size
+            )
+        }
+        if total_len < self.seq_len + self.kernel_size.saturating_sub(1) {
+            candle::bail!(
+                "linear-prefill-conv-pack total_len {} too small for seq_len {} kernel {}",
+                total_len,
+                self.seq_len,
+                self.kernel_size
+            )
+        }
+
+        let device = mixed_qkv.device().clone();
+        let storage_dtype = mixed_qkv.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let output_shape = candle::Shape::from((self.batch_size, self.seq_len, self.conv_dim));
+        let elem_count = output_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let mixed_qkv = mixed_qkv.cpu_storage().as_slice::<$ty>()?;
+                let mixed_qkv = match mixed_qkv_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &mixed_qkv[o1..o2],
+                    None => candle::bail!("linear-prefill-conv-pack requires contiguous inputs"),
+                };
+                let weights = weights.cpu_storage().as_slice::<$ty>()?;
+                let weights = match weights_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &weights[o1..o2],
+                    None => candle::bail!("linear-prefill-conv-pack requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_linear_prefill_conv_pack(
+                        dtype_code,
+                        device.ordinal(),
+                        self.batch_size,
+                        self.conv_dim,
+                        self.total_len,
+                        self.seq_len,
+                        self.kernel_size,
+                        mixed_qkv.as_ptr() as *const c_void,
+                        weights.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    output_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("linear-prefill-conv-pack unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn linear_prefill_conv_pack(
@@ -859,6 +1111,122 @@ impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
         _l3: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("full-attention-prefill-megakernel has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        query: &candle::CudaStorage,
+        query_layout: &candle::Layout,
+        key: &candle::CudaStorage,
+        key_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("full-attention-prefill-megakernel requires contiguous inputs")
+        }
+
+        let (batch_size, q_heads, q_len, head_dim) = query_layout.shape().dims4()?;
+        let (key_batch, kv_heads, kv_len, key_head_dim) = key_layout.shape().dims4()?;
+        let (value_batch, value_kv_heads, value_kv_len, value_head_dim) =
+            value_layout.shape().dims4()?;
+        if batch_size != self.batch_size
+            || key_batch != self.batch_size
+            || value_batch != self.batch_size
+            || q_heads != self.q_heads
+            || kv_heads != self.kv_heads
+            || value_kv_heads != self.kv_heads
+            || q_len != self.q_len
+            || kv_len != self.kv_len
+            || value_kv_len != self.kv_len
+            || head_dim != self.head_dim
+            || key_head_dim != self.head_dim
+            || value_head_dim != self.head_dim
+        {
+            candle::bail!(
+                "full-attention-prefill-megakernel shape mismatch: query={:?} key={:?} value={:?}",
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = query.device().clone();
+        let out_shape =
+            candle::Shape::from((self.batch_size, self.q_heads, self.q_len, self.head_dim));
+        let elem_count = out_shape.elem_count();
+        let total_rows = self.batch_size * self.q_heads * self.q_len;
+        let cfg = LaunchConfig::for_num_elems(total_rows as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let query = query.as_cuda_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => query.slice(o1..o2),
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let key = key.as_cuda_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => key.slice(o1..o2),
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    self.batch_size,
+                    self.q_heads,
+                    self.kv_heads,
+                    self.q_len,
+                    self.kv_len,
+                    self.head_dim,
+                    self.num_kv_groups,
+                    self.scale,
+                    self.seqlen_offset
+                );
+                builder.arg(&query);
+                builder.arg(&key);
+                builder.arg(&value);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match query.dtype() {
+            DType::F16 => launch!(half::f16, "full_attention_prefill_f16"),
+            DType::F32 => launch!(f32, "full_attention_prefill_f32"),
+            DType::BF16 => launch!(half::bf16, "full_attention_prefill_bf16"),
+            other => candle::bail!("full-attention-prefill-megakernel unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -956,6 +1324,126 @@ impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
             candle::MetalStorage::new(output, device.clone(), elem_count, query.dtype()),
             out_shape,
         ))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        query: &candle::HipStorage,
+        query_layout: &candle::Layout,
+        key: &candle::HipStorage,
+        key_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("full-attention-prefill-megakernel requires contiguous inputs")
+        }
+
+        let (batch_size, q_heads, q_len, head_dim) = query_layout.shape().dims4()?;
+        let (key_batch, kv_heads, kv_len, key_head_dim) = key_layout.shape().dims4()?;
+        let (value_batch, value_kv_heads, value_kv_len, value_head_dim) =
+            value_layout.shape().dims4()?;
+        if batch_size != self.batch_size
+            || key_batch != self.batch_size
+            || value_batch != self.batch_size
+            || q_heads != self.q_heads
+            || kv_heads != self.kv_heads
+            || value_kv_heads != self.kv_heads
+            || q_len != self.q_len
+            || kv_len != self.kv_len
+            || value_kv_len != self.kv_len
+            || head_dim != self.head_dim
+            || key_head_dim != self.head_dim
+            || value_head_dim != self.head_dim
+        {
+            candle::bail!(
+                "full-attention-prefill-megakernel shape mismatch: query={:?} key={:?} value={:?}",
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = query.device().clone();
+        let storage_dtype = query.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape =
+            candle::Shape::from((self.batch_size, self.q_heads, self.q_len, self.head_dim));
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let query = query.cpu_storage().as_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &query[o1..o2],
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let key = key.cpu_storage().as_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &key[o1..o2],
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => {
+                        candle::bail!(
+                            "full-attention-prefill-megakernel requires contiguous inputs"
+                        )
+                    }
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_full_attention_prefill(
+                        dtype_code,
+                        device.ordinal(),
+                        self.batch_size,
+                        self.q_heads,
+                        self.kv_heads,
+                        self.q_len,
+                        self.kv_len,
+                        self.head_dim,
+                        self.num_kv_groups,
+                        self.scale,
+                        self.seqlen_offset,
+                        query.as_ptr() as *const c_void,
+                        key.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("full-attention-prefill-megakernel unsupported dtype {other:?}"),
+        }
     }
 }
 
@@ -1132,6 +1620,100 @@ impl candle::CustomOp3 for DeltaStateScan {
         candle::bail!("delta-state-scan has no cpu implementation")
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        initial_state: &candle::CudaStorage,
+        initial_layout: &candle::Layout,
+        packed_scan: &candle::CudaStorage,
+        packed_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(initial_layout.is_contiguous()
+            && packed_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-state-scan requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (packed_bh, num_chunks, chunk_size, packed_width) = packed_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk_size, value_v_head_dim) =
+            value_layout.shape().dims4()?;
+        if packed_bh != batch_heads
+            || value_bh != batch_heads
+            || value_num_chunks != num_chunks
+            || value_chunk_size != chunk_size
+            || value_v_head_dim != v_head_dim
+            || packed_width != 2 * k_head_dim + 1
+        {
+            candle::bail!(
+                "delta-state-scan shape mismatch: initial={:?} packed={:?} value={:?}",
+                initial_layout.shape().dims(),
+                packed_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, num_chunks + 1, k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let initial_state = initial_state.as_cuda_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => initial_state.slice(o1..o2),
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let packed_scan = packed_scan.as_cuda_slice::<$ty>()?;
+                let packed_scan = match packed_layout.contiguous_offsets() {
+                    Some((o1, o2)) => packed_scan.slice(o1..o2),
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    batch_heads,
+                    num_chunks,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim
+                );
+                builder.arg(&initial_state);
+                builder.arg(&packed_scan);
+                builder.arg(&value);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match initial_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_state_scan_f16"),
+            DType::F32 => launch!(f32, "delta_state_scan_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_state_scan_bf16"),
+            other => candle::bail!("delta-state-scan unsupported dtype {other:?}"),
+        }
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
@@ -1216,6 +1798,104 @@ impl candle::CustomOp3 for DeltaStateScan {
             candle::MetalStorage::new(output, device.clone(), elem_count, initial_state.dtype());
         Ok((storage, out_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        initial_state: &candle::HipStorage,
+        initial_layout: &candle::Layout,
+        packed_scan: &candle::HipStorage,
+        packed_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(initial_layout.is_contiguous()
+            && packed_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-state-scan requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (packed_bh, num_chunks, chunk_size, packed_width) = packed_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk_size, value_v_head_dim) =
+            value_layout.shape().dims4()?;
+        if packed_bh != batch_heads
+            || value_bh != batch_heads
+            || value_num_chunks != num_chunks
+            || value_chunk_size != chunk_size
+            || value_v_head_dim != v_head_dim
+            || packed_width != 2 * k_head_dim + 1
+        {
+            candle::bail!(
+                "delta-state-scan shape mismatch: initial={:?} packed={:?} value={:?}",
+                initial_layout.shape().dims(),
+                packed_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let storage_dtype = initial_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, num_chunks + 1, k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let initial_state = initial_state.cpu_storage().as_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &initial_state[o1..o2],
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let packed_scan = packed_scan.cpu_storage().as_slice::<$ty>()?;
+                let packed_scan = match packed_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &packed_scan[o1..o2],
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-state-scan requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_state_scan(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        num_chunks,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        initial_state.as_ptr() as *const c_void,
+                        packed_scan.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-state-scan unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn delta_state_scan(
@@ -1244,6 +1924,91 @@ impl candle::CustomOp3 for DeltaChunkFused {
         _l3: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("delta-chunk-fused has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        prev_state: &candle::CudaStorage,
+        prev_layout: &candle::Layout,
+        packed_chunk: &candle::CudaStorage,
+        packed_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(prev_layout.is_contiguous()
+            && packed_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-fused requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (packed_bh, chunk_size, packed_width) = packed_layout.shape().dims3()?;
+        let (value_bh, value_chunk_size, value_v_head_dim) = value_layout.shape().dims3()?;
+        if packed_bh != batch_heads
+            || value_bh != batch_heads
+            || value_chunk_size != chunk_size
+            || value_v_head_dim != v_head_dim
+            || packed_width != 3 * k_head_dim + 1
+        {
+            candle::bail!(
+                "delta-chunk-fused shape mismatch: prev={:?} packed={:?} value={:?}",
+                prev_layout.shape().dims(),
+                packed_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, 2 * chunk_size + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let prev_state = prev_state.as_cuda_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => prev_state.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let packed_chunk = packed_chunk.as_cuda_slice::<$ty>()?;
+                let packed_chunk = match packed_layout.contiguous_offsets() {
+                    Some((o1, o2)) => packed_chunk.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(builder, batch_heads, chunk_size, k_head_dim, v_head_dim);
+                builder.arg(&prev_state);
+                builder.arg(&packed_chunk);
+                builder.arg(&value);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match prev_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_chunk_fused_f16"),
+            DType::F32 => launch!(f32, "delta_chunk_fused_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_chunk_fused_bf16"),
+            other => candle::bail!("delta-chunk-fused unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -1327,6 +2092,101 @@ impl candle::CustomOp3 for DeltaChunkFused {
             candle::MetalStorage::new(output, device.clone(), elem_count, prev_state.dtype());
         Ok((storage, out_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        prev_state: &candle::HipStorage,
+        prev_layout: &candle::Layout,
+        packed_chunk: &candle::HipStorage,
+        packed_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(prev_layout.is_contiguous()
+            && packed_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-fused requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (packed_bh, chunk_size, packed_width) = packed_layout.shape().dims3()?;
+        let (value_bh, value_chunk_size, value_v_head_dim) = value_layout.shape().dims3()?;
+        if packed_bh != batch_heads
+            || value_bh != batch_heads
+            || value_chunk_size != chunk_size
+            || value_v_head_dim != v_head_dim
+            || packed_width != 3 * k_head_dim + 1
+        {
+            candle::bail!(
+                "delta-chunk-fused shape mismatch: prev={:?} packed={:?} value={:?}",
+                prev_layout.shape().dims(),
+                packed_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let storage_dtype = prev_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, 2 * chunk_size + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let prev_state = prev_state.cpu_storage().as_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &prev_state[o1..o2],
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let packed_chunk = packed_chunk.cpu_storage().as_slice::<$ty>()?;
+                let packed_chunk = match packed_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &packed_chunk[o1..o2],
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-chunk-fused requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_chunk_fused(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        prev_state.as_ptr() as *const c_void,
+                        packed_chunk.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-chunk-fused unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn delta_chunk_fused(prev_state: &Tensor, packed_chunk: &Tensor, value: &Tensor) -> Result<Tensor> {
@@ -1357,6 +2217,130 @@ impl candle::CustomOp6 for DeltaRecurrentPrefill {
         _l6: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("delta-recurrent-prefill has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        initial_state: &candle::CudaStorage,
+        initial_layout: &candle::Layout,
+        query: &candle::CudaStorage,
+        query_layout: &candle::Layout,
+        key: &candle::CudaStorage,
+        key_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::CudaStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::CudaStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(initial_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-recurrent-prefill requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (query_bh, seq_len, query_k) = query_layout.shape().dims3()?;
+        let (key_bh, key_seq, key_k) = key_layout.shape().dims3()?;
+        let (value_bh, value_seq, value_v) = value_layout.shape().dims3()?;
+        let (beta_bh, beta_seq) = beta_layout.shape().dims2()?;
+        let (g_bh, g_seq) = g_layout.shape().dims2()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_seq != seq_len
+            || value_seq != seq_len
+            || beta_seq != seq_len
+            || g_seq != seq_len
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-recurrent-prefill shape mismatch: initial={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                initial_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let out_shape = candle::Shape::from_dims(&[batch_heads, seq_len + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let initial_state = initial_state.as_cuda_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => initial_state.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let query = query.as_cuda_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => query.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let key = key.as_cuda_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => key.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let beta = beta.as_cuda_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => beta.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let g = g.as_cuda_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => g.slice(o1..o2),
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(builder, batch_heads, seq_len, k_head_dim, v_head_dim);
+                builder.arg(&initial_state);
+                builder.arg(&query);
+                builder.arg(&key);
+                builder.arg(&value);
+                builder.arg(&beta);
+                builder.arg(&g);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match initial_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_recurrent_prefill_f16"),
+            DType::F32 => launch!(f32, "delta_recurrent_prefill_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_recurrent_prefill_bf16"),
+            other => candle::bail!("delta-recurrent-prefill unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -1477,6 +2461,140 @@ impl candle::CustomOp6 for DeltaRecurrentPrefill {
             candle::MetalStorage::new(output, device.clone(), elem_count, initial_state.dtype());
         Ok((storage, out_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        initial_state: &candle::HipStorage,
+        initial_layout: &candle::Layout,
+        query: &candle::HipStorage,
+        query_layout: &candle::Layout,
+        key: &candle::HipStorage,
+        key_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::HipStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::HipStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(initial_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-recurrent-prefill requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (query_bh, seq_len, query_k) = query_layout.shape().dims3()?;
+        let (key_bh, key_seq, key_k) = key_layout.shape().dims3()?;
+        let (value_bh, value_seq, value_v) = value_layout.shape().dims3()?;
+        let (beta_bh, beta_seq) = beta_layout.shape().dims2()?;
+        let (g_bh, g_seq) = g_layout.shape().dims2()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_seq != seq_len
+            || value_seq != seq_len
+            || beta_seq != seq_len
+            || g_seq != seq_len
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-recurrent-prefill shape mismatch: initial={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                initial_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let storage_dtype = initial_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape = candle::Shape::from_dims(&[batch_heads, seq_len + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let initial_state = initial_state.cpu_storage().as_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &initial_state[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let query = query.cpu_storage().as_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &query[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let key = key.cpu_storage().as_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &key[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let beta = beta.cpu_storage().as_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &beta[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let g = g.cpu_storage().as_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &g[o1..o2],
+                    None => candle::bail!("delta-recurrent-prefill requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_recurrent_prefill(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        seq_len,
+                        k_head_dim,
+                        v_head_dim,
+                        initial_state.as_ptr() as *const c_void,
+                        query.as_ptr() as *const c_void,
+                        key.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        beta.as_ptr() as *const c_void,
+                        g.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-recurrent-prefill unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn delta_recurrent_prefill(
@@ -1514,6 +2632,131 @@ impl candle::CustomOp6 for DeltaChunkStepRaw {
         _l6: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("delta-chunk-step-raw has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        prev_state: &candle::CudaStorage,
+        prev_layout: &candle::Layout,
+        query: &candle::CudaStorage,
+        query_layout: &candle::Layout,
+        key: &candle::CudaStorage,
+        key_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::CudaStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::CudaStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(prev_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-step-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (query_bh, chunk_size, query_k) = query_layout.shape().dims3()?;
+        let (key_bh, key_chunk, key_k) = key_layout.shape().dims3()?;
+        let (value_bh, value_chunk, value_v) = value_layout.shape().dims3()?;
+        let (beta_bh, beta_chunk) = beta_layout.shape().dims2()?;
+        let (g_bh, g_chunk) = g_layout.shape().dims2()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-step-raw shape mismatch: prev={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                prev_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, chunk_size + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let prev_state = prev_state.as_cuda_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => prev_state.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let query = query.as_cuda_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => query.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let key = key.as_cuda_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => key.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let beta = beta.as_cuda_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => beta.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let g = g.as_cuda_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => g.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(builder, batch_heads, chunk_size, k_head_dim, v_head_dim);
+                builder.arg(&prev_state);
+                builder.arg(&query);
+                builder.arg(&key);
+                builder.arg(&value);
+                builder.arg(&beta);
+                builder.arg(&g);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match prev_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_chunk_step_f16"),
+            DType::F32 => launch!(f32, "delta_chunk_step_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_chunk_step_bf16"),
+            other => candle::bail!("delta-chunk-step-raw unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -1718,6 +2961,141 @@ impl candle::CustomOp6 for DeltaChunkStepRaw {
             candle::MetalStorage::new(output, device.clone(), elem_count, prev_state.dtype());
         Ok((storage, out_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        prev_state: &candle::HipStorage,
+        prev_layout: &candle::Layout,
+        query: &candle::HipStorage,
+        query_layout: &candle::Layout,
+        key: &candle::HipStorage,
+        key_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::HipStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::HipStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(prev_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-step-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (query_bh, chunk_size, query_k) = query_layout.shape().dims3()?;
+        let (key_bh, key_chunk, key_k) = key_layout.shape().dims3()?;
+        let (value_bh, value_chunk, value_v) = value_layout.shape().dims3()?;
+        let (beta_bh, beta_chunk) = beta_layout.shape().dims2()?;
+        let (g_bh, g_chunk) = g_layout.shape().dims2()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-step-raw shape mismatch: prev={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                prev_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let storage_dtype = prev_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape =
+            candle::Shape::from_dims(&[batch_heads, chunk_size + k_head_dim, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let prev_state = prev_state.cpu_storage().as_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &prev_state[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let query = query.cpu_storage().as_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &query[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let key = key.cpu_storage().as_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &key[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let beta = beta.cpu_storage().as_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &beta[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let g = g.cpu_storage().as_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &g[o1..o2],
+                    None => candle::bail!("delta-chunk-step-raw requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_chunk_step(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        prev_state.as_ptr() as *const c_void,
+                        query.as_ptr() as *const c_void,
+                        key.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        beta.as_ptr() as *const c_void,
+                        g.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-chunk-step-raw unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn delta_chunk_step_raw(
@@ -1755,6 +3133,155 @@ impl candle::CustomOp6 for DeltaChunkStepWindowedRaw {
         _l6: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("delta-chunk-step-windowed-raw has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        prev_state: &candle::CudaStorage,
+        prev_layout: &candle::Layout,
+        query: &candle::CudaStorage,
+        query_layout: &candle::Layout,
+        key: &candle::CudaStorage,
+        key_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::CudaStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::CudaStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(prev_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (query_bh, num_chunks, chunk_size, query_k) = query_layout.shape().dims4()?;
+        let (key_bh, key_num_chunks, key_chunk, key_k) = key_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk, value_v) = value_layout.shape().dims4()?;
+        let (beta_bh, beta_num_chunks, beta_chunk) = beta_layout.shape().dims3()?;
+        let (g_bh, g_num_chunks, g_chunk) = g_layout.shape().dims3()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || beta_num_chunks != num_chunks
+            || g_num_chunks != num_chunks
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-step-windowed-raw shape mismatch: prev={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                prev_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let total_tokens = num_chunks * chunk_size;
+        let total_rows = total_tokens + k_head_dim;
+        let out_shape = candle::Shape::from_dims(&[batch_heads, total_rows, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let prev_state = prev_state.as_cuda_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => prev_state.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let query = query.as_cuda_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => query.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let key = key.as_cuda_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => key.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let beta = beta.as_cuda_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => beta.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let g = g.as_cuda_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => g.slice(o1..o2),
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    batch_heads,
+                    num_chunks,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim
+                );
+                builder.arg(&prev_state);
+                builder.arg(&query);
+                builder.arg(&key);
+                builder.arg(&value);
+                builder.arg(&beta);
+                builder.arg(&g);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match prev_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_chunk_step_windowed_f16"),
+            DType::F32 => launch!(f32, "delta_chunk_step_windowed_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_chunk_step_windowed_bf16"),
+            other => candle::bail!("delta-chunk-step-windowed-raw unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -1955,6 +3482,159 @@ impl candle::CustomOp6 for DeltaChunkStepWindowedRaw {
         let storage =
             candle::MetalStorage::new(output, device.clone(), elem_count, prev_state.dtype());
         Ok((storage, out_shape))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        prev_state: &candle::HipStorage,
+        prev_layout: &candle::Layout,
+        query: &candle::HipStorage,
+        query_layout: &candle::Layout,
+        key: &candle::HipStorage,
+        key_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::HipStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::HipStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(prev_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = prev_layout.shape().dims3()?;
+        let (query_bh, num_chunks, chunk_size, query_k) = query_layout.shape().dims4()?;
+        let (key_bh, key_num_chunks, key_chunk, key_k) = key_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk, value_v) = value_layout.shape().dims4()?;
+        let (beta_bh, beta_num_chunks, beta_chunk) = beta_layout.shape().dims3()?;
+        let (g_bh, g_num_chunks, g_chunk) = g_layout.shape().dims3()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || beta_num_chunks != num_chunks
+            || g_num_chunks != num_chunks
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-step-windowed-raw shape mismatch: prev={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                prev_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = prev_state.device().clone();
+        let storage_dtype = prev_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let total_tokens = num_chunks * chunk_size;
+        let total_rows = total_tokens + k_head_dim;
+        let out_shape = candle::Shape::from_dims(&[batch_heads, total_rows, v_head_dim]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let prev_state = prev_state.cpu_storage().as_slice::<$ty>()?;
+                let prev_state = match prev_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &prev_state[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let query = query.cpu_storage().as_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &query[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let key = key.cpu_storage().as_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &key[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let beta = beta.cpu_storage().as_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &beta[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let g = g.cpu_storage().as_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &g[o1..o2],
+                    None => {
+                        candle::bail!("delta-chunk-step-windowed-raw requires contiguous inputs")
+                    }
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_chunk_windowed(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        num_chunks,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        prev_state.as_ptr() as *const c_void,
+                        query.as_ptr() as *const c_void,
+                        key.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        beta.as_ptr() as *const c_void,
+                        g.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-chunk-step-windowed-raw unsupported dtype {other:?}"),
+        }
     }
 }
 
@@ -2286,6 +3966,145 @@ impl candle::CustomOp6 for DeltaChunkScanRaw {
         candle::bail!("delta-chunk-scan-raw has no cpu implementation")
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        initial_state: &candle::CudaStorage,
+        initial_layout: &candle::Layout,
+        query: &candle::CudaStorage,
+        query_layout: &candle::Layout,
+        key: &candle::CudaStorage,
+        key_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::CudaStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::CudaStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(initial_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-scan-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (query_bh, num_chunks, chunk_size, query_k) = query_layout.shape().dims4()?;
+        let (key_bh, key_num_chunks, key_chunk, key_k) = key_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk, value_v) = value_layout.shape().dims4()?;
+        let (beta_bh, beta_num_chunks, beta_chunk) = beta_layout.shape().dims3()?;
+        let (g_bh, g_num_chunks, g_chunk) = g_layout.shape().dims3()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || beta_num_chunks != num_chunks
+            || g_num_chunks != num_chunks
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-scan-raw shape mismatch: initial={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                initial_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let out_shape = candle::Shape::from_dims(&[
+            batch_heads,
+            num_chunks * chunk_size + k_head_dim,
+            v_head_dim,
+        ]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let initial_state = initial_state.as_cuda_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => initial_state.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let query = query.as_cuda_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => query.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let key = key.as_cuda_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => key.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let beta = beta.as_cuda_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => beta.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let g = g.as_cuda_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => g.slice(o1..o2),
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    batch_heads,
+                    num_chunks,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim
+                );
+                builder.arg(&initial_state);
+                builder.arg(&query);
+                builder.arg(&key);
+                builder.arg(&value);
+                builder.arg(&beta);
+                builder.arg(&g);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match initial_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_chunk_scan_raw_f16"),
+            DType::F32 => launch!(f32, "delta_chunk_scan_raw_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_chunk_scan_raw_bf16"),
+            other => candle::bail!("delta-chunk-scan-raw unsupported dtype {other:?}"),
+        }
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
@@ -2413,6 +4232,149 @@ impl candle::CustomOp6 for DeltaChunkScanRaw {
             candle::MetalStorage::new(output, device.clone(), elem_count, initial_state.dtype());
         Ok((storage, out_shape))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        initial_state: &candle::HipStorage,
+        initial_layout: &candle::Layout,
+        query: &candle::HipStorage,
+        query_layout: &candle::Layout,
+        key: &candle::HipStorage,
+        key_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+        beta: &candle::HipStorage,
+        beta_layout: &candle::Layout,
+        g: &candle::HipStorage,
+        g_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(initial_layout.is_contiguous()
+            && query_layout.is_contiguous()
+            && key_layout.is_contiguous()
+            && value_layout.is_contiguous()
+            && beta_layout.is_contiguous()
+            && g_layout.is_contiguous())
+        {
+            candle::bail!("delta-chunk-scan-raw requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (query_bh, num_chunks, chunk_size, query_k) = query_layout.shape().dims4()?;
+        let (key_bh, key_num_chunks, key_chunk, key_k) = key_layout.shape().dims4()?;
+        let (value_bh, value_num_chunks, value_chunk, value_v) = value_layout.shape().dims4()?;
+        let (beta_bh, beta_num_chunks, beta_chunk) = beta_layout.shape().dims3()?;
+        let (g_bh, g_num_chunks, g_chunk) = g_layout.shape().dims3()?;
+        if query_bh != batch_heads
+            || key_bh != batch_heads
+            || value_bh != batch_heads
+            || beta_bh != batch_heads
+            || g_bh != batch_heads
+            || key_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || beta_num_chunks != num_chunks
+            || g_num_chunks != num_chunks
+            || key_chunk != chunk_size
+            || value_chunk != chunk_size
+            || beta_chunk != chunk_size
+            || g_chunk != chunk_size
+            || query_k != k_head_dim
+            || key_k != k_head_dim
+            || value_v != v_head_dim
+        {
+            candle::bail!(
+                "delta-chunk-scan-raw shape mismatch: initial={:?} query={:?} key={:?} value={:?} beta={:?} g={:?}",
+                initial_layout.shape().dims(),
+                query_layout.shape().dims(),
+                key_layout.shape().dims(),
+                value_layout.shape().dims(),
+                beta_layout.shape().dims(),
+                g_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let storage_dtype = initial_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape = candle::Shape::from_dims(&[
+            batch_heads,
+            num_chunks * chunk_size + k_head_dim,
+            v_head_dim,
+        ]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let initial_state = initial_state.cpu_storage().as_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &initial_state[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let query = query.cpu_storage().as_slice::<$ty>()?;
+                let query = match query_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &query[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let key = key.cpu_storage().as_slice::<$ty>()?;
+                let key = match key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &key[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let beta = beta.cpu_storage().as_slice::<$ty>()?;
+                let beta = match beta_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &beta[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let g = g.cpu_storage().as_slice::<$ty>()?;
+                let g = match g_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &g[o1..o2],
+                    None => candle::bail!("delta-chunk-scan-raw requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_chunk_scan_raw(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        num_chunks,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        initial_state.as_ptr() as *const c_void,
+                        query.as_ptr() as *const c_void,
+                        key.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        beta.as_ptr() as *const c_void,
+                        g.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-chunk-scan-raw unsupported dtype {other:?}"),
+        }
+    }
 }
 
 fn delta_chunk_scan_raw(
@@ -2452,6 +4414,165 @@ impl candle::CustomOp7 for DeltaFullScan {
         _l7: &candle::Layout,
     ) -> Result<(candle::CpuStorage, candle::Shape)> {
         candle::bail!("delta-full-scan has no cpu implementation")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        initial_state: &candle::CudaStorage,
+        initial_layout: &candle::Layout,
+        weighted_key_scan: &candle::CudaStorage,
+        weighted_key_layout: &candle::Layout,
+        k_cumdecay_scan: &candle::CudaStorage,
+        k_cumdecay_layout: &candle::Layout,
+        q_state_scan: &candle::CudaStorage,
+        q_state_layout: &candle::Layout,
+        local_attn_scan: &candle::CudaStorage,
+        local_attn_layout: &candle::Layout,
+        state_decay_scan: &candle::CudaStorage,
+        state_decay_layout: &candle::Layout,
+        value: &candle::CudaStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::CudaStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle::cuda_backend::WrapErr;
+
+        if !(initial_layout.is_contiguous()
+            && weighted_key_layout.is_contiguous()
+            && k_cumdecay_layout.is_contiguous()
+            && q_state_layout.is_contiguous()
+            && local_attn_layout.is_contiguous()
+            && state_decay_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-full-scan requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (weighted_key_bh, num_chunks, chunk_size, weighted_key_width) =
+            weighted_key_layout.shape().dims4()?;
+        let (k_cumdecay_bh, k_cumdecay_num_chunks, k_cumdecay_chunk_size, k_cumdecay_width) =
+            k_cumdecay_layout.shape().dims4()?;
+        let (q_state_bh, q_state_num_chunks, q_state_chunk_size, q_state_width) =
+            q_state_layout.shape().dims4()?;
+        let (local_attn_bh, local_attn_num_chunks, local_attn_chunk_size, local_attn_width) =
+            local_attn_layout.shape().dims4()?;
+        let (state_decay_bh, state_decay_num_chunks) = state_decay_layout.shape().dims2()?;
+        let (value_bh, value_num_chunks, value_chunk_size, value_v_head_dim) =
+            value_layout.shape().dims4()?;
+        if weighted_key_bh != batch_heads
+            || k_cumdecay_bh != batch_heads
+            || q_state_bh != batch_heads
+            || local_attn_bh != batch_heads
+            || state_decay_bh != batch_heads
+            || value_bh != batch_heads
+            || k_cumdecay_num_chunks != num_chunks
+            || q_state_num_chunks != num_chunks
+            || local_attn_num_chunks != num_chunks
+            || state_decay_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || k_cumdecay_chunk_size != chunk_size
+            || q_state_chunk_size != chunk_size
+            || local_attn_chunk_size != chunk_size
+            || value_chunk_size != chunk_size
+            || weighted_key_width != k_head_dim
+            || k_cumdecay_width != k_head_dim
+            || q_state_width != k_head_dim
+            || local_attn_width != chunk_size
+            || value_v_head_dim != v_head_dim
+        {
+            candle::bail!(
+                "delta-full-scan shape mismatch: initial={:?} weighted_key={:?} k_cumdecay={:?} q_state={:?} local_attn={:?} state_decay={:?} value={:?}",
+                initial_layout.shape().dims(),
+                weighted_key_layout.shape().dims(),
+                k_cumdecay_layout.shape().dims(),
+                q_state_layout.shape().dims(),
+                local_attn_layout.shape().dims(),
+                state_decay_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let out_shape = candle::Shape::from_dims(&[
+            batch_heads,
+            num_chunks * chunk_size + k_head_dim,
+            v_head_dim,
+        ]);
+        let elem_count = out_shape.elem_count();
+        let total_threads = batch_heads * v_head_dim;
+        let cfg = LaunchConfig::for_num_elems(total_threads as u32);
+
+        macro_rules! launch {
+            ($ty:ty, $kernel:expr) => {{
+                let initial_state = initial_state.as_cuda_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => initial_state.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let weighted_key_scan = weighted_key_scan.as_cuda_slice::<$ty>()?;
+                let weighted_key_scan = match weighted_key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => weighted_key_scan.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let k_cumdecay_scan = k_cumdecay_scan.as_cuda_slice::<$ty>()?;
+                let k_cumdecay_scan = match k_cumdecay_layout.contiguous_offsets() {
+                    Some((o1, o2)) => k_cumdecay_scan.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let q_state_scan = q_state_scan.as_cuda_slice::<$ty>()?;
+                let q_state_scan = match q_state_layout.contiguous_offsets() {
+                    Some((o1, o2)) => q_state_scan.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let local_attn_scan = local_attn_scan.as_cuda_slice::<$ty>()?;
+                let local_attn_scan = match local_attn_layout.contiguous_offsets() {
+                    Some((o1, o2)) => local_attn_scan.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let state_decay_scan = state_decay_scan.as_cuda_slice::<$ty>()?;
+                let state_decay_scan = match state_decay_layout.contiguous_offsets() {
+                    Some((o1, o2)) => state_decay_scan.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let value = value.as_cuda_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => value.slice(o1..o2),
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let output = unsafe { device.alloc::<$ty>(elem_count) }?;
+                let func = device
+                    .get_or_load_func($kernel, &candle::cuda_backend::kernels::QWEN35_DELTA)?;
+                let mut builder = func.builder();
+                candle::builder_arg!(
+                    builder,
+                    batch_heads,
+                    num_chunks,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim
+                );
+                builder.arg(&initial_state);
+                builder.arg(&weighted_key_scan);
+                builder.arg(&k_cumdecay_scan);
+                builder.arg(&q_state_scan);
+                builder.arg(&local_attn_scan);
+                builder.arg(&state_decay_scan);
+                builder.arg(&value);
+                builder.arg(&output);
+                unsafe { builder.launch(cfg) }.w()?;
+                let storage = candle::CudaStorage::wrap_cuda_slice(output, device.clone());
+                Ok((storage, out_shape.clone()))
+            }};
+        }
+
+        match initial_state.dtype() {
+            DType::F16 => launch!(half::f16, "delta_full_scan_f16"),
+            DType::F32 => launch!(f32, "delta_full_scan_f32"),
+            DType::BF16 => launch!(half::bf16, "delta_full_scan_bf16"),
+            other => candle::bail!("delta-full-scan unsupported dtype {other:?}"),
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -2602,6 +4723,169 @@ impl candle::CustomOp7 for DeltaFullScan {
         let storage =
             candle::MetalStorage::new(output, device.clone(), elem_count, initial_state.dtype());
         Ok((storage, out_shape))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        initial_state: &candle::HipStorage,
+        initial_layout: &candle::Layout,
+        weighted_key_scan: &candle::HipStorage,
+        weighted_key_layout: &candle::Layout,
+        k_cumdecay_scan: &candle::HipStorage,
+        k_cumdecay_layout: &candle::Layout,
+        q_state_scan: &candle::HipStorage,
+        q_state_layout: &candle::Layout,
+        local_attn_scan: &candle::HipStorage,
+        local_attn_layout: &candle::Layout,
+        state_decay_scan: &candle::HipStorage,
+        state_decay_layout: &candle::Layout,
+        value: &candle::HipStorage,
+        value_layout: &candle::Layout,
+    ) -> Result<(candle::HipStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use std::ffi::c_void;
+
+        if !(initial_layout.is_contiguous()
+            && weighted_key_layout.is_contiguous()
+            && k_cumdecay_layout.is_contiguous()
+            && q_state_layout.is_contiguous()
+            && local_attn_layout.is_contiguous()
+            && state_decay_layout.is_contiguous()
+            && value_layout.is_contiguous())
+        {
+            candle::bail!("delta-full-scan requires contiguous inputs")
+        }
+
+        let (batch_heads, k_head_dim, v_head_dim) = initial_layout.shape().dims3()?;
+        let (weighted_key_bh, num_chunks, chunk_size, weighted_key_width) =
+            weighted_key_layout.shape().dims4()?;
+        let (k_cumdecay_bh, k_cumdecay_num_chunks, k_cumdecay_chunk_size, k_cumdecay_width) =
+            k_cumdecay_layout.shape().dims4()?;
+        let (q_state_bh, q_state_num_chunks, q_state_chunk_size, q_state_width) =
+            q_state_layout.shape().dims4()?;
+        let (local_attn_bh, local_attn_num_chunks, local_attn_chunk_size, local_attn_width) =
+            local_attn_layout.shape().dims4()?;
+        let (state_decay_bh, state_decay_num_chunks) = state_decay_layout.shape().dims2()?;
+        let (value_bh, value_num_chunks, value_chunk_size, value_v_head_dim) =
+            value_layout.shape().dims4()?;
+        if weighted_key_bh != batch_heads
+            || k_cumdecay_bh != batch_heads
+            || q_state_bh != batch_heads
+            || local_attn_bh != batch_heads
+            || state_decay_bh != batch_heads
+            || value_bh != batch_heads
+            || k_cumdecay_num_chunks != num_chunks
+            || q_state_num_chunks != num_chunks
+            || local_attn_num_chunks != num_chunks
+            || state_decay_num_chunks != num_chunks
+            || value_num_chunks != num_chunks
+            || k_cumdecay_chunk_size != chunk_size
+            || q_state_chunk_size != chunk_size
+            || local_attn_chunk_size != chunk_size
+            || value_chunk_size != chunk_size
+            || weighted_key_width != k_head_dim
+            || k_cumdecay_width != k_head_dim
+            || q_state_width != k_head_dim
+            || local_attn_width != chunk_size
+            || value_v_head_dim != v_head_dim
+        {
+            candle::bail!(
+                "delta-full-scan shape mismatch: initial={:?} weighted_key={:?} k_cumdecay={:?} q_state={:?} local_attn={:?} state_decay={:?} value={:?}",
+                initial_layout.shape().dims(),
+                weighted_key_layout.shape().dims(),
+                k_cumdecay_layout.shape().dims(),
+                q_state_layout.shape().dims(),
+                local_attn_layout.shape().dims(),
+                state_decay_layout.shape().dims(),
+                value_layout.shape().dims()
+            )
+        }
+
+        let device = initial_state.device().clone();
+        let storage_dtype = initial_state.dtype();
+        let dtype_code = candle::hip::qwen35_dtype_code(storage_dtype)?;
+        let out_shape = candle::Shape::from_dims(&[
+            batch_heads,
+            num_chunks * chunk_size + k_head_dim,
+            v_head_dim,
+        ]);
+        let elem_count = out_shape.elem_count();
+
+        macro_rules! launch {
+            ($ty:ty, $zero:expr) => {{
+                let initial_state = initial_state.cpu_storage().as_slice::<$ty>()?;
+                let initial_state = match initial_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &initial_state[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let weighted_key_scan = weighted_key_scan.cpu_storage().as_slice::<$ty>()?;
+                let weighted_key_scan = match weighted_key_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &weighted_key_scan[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let k_cumdecay_scan = k_cumdecay_scan.cpu_storage().as_slice::<$ty>()?;
+                let k_cumdecay_scan = match k_cumdecay_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &k_cumdecay_scan[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let q_state_scan = q_state_scan.cpu_storage().as_slice::<$ty>()?;
+                let q_state_scan = match q_state_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &q_state_scan[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let local_attn_scan = local_attn_scan.cpu_storage().as_slice::<$ty>()?;
+                let local_attn_scan = match local_attn_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &local_attn_scan[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let state_decay_scan = state_decay_scan.cpu_storage().as_slice::<$ty>()?;
+                let state_decay_scan = match state_decay_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &state_decay_scan[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let value = value.cpu_storage().as_slice::<$ty>()?;
+                let value = match value_layout.contiguous_offsets() {
+                    Some((o1, o2)) => &value[o1..o2],
+                    None => candle::bail!("delta-full-scan requires contiguous inputs"),
+                };
+                let mut output = vec![$zero; elem_count];
+                let status = unsafe {
+                    candle::hip::ffi::qwen35_hip_delta_full_scan(
+                        dtype_code,
+                        device.ordinal(),
+                        batch_heads,
+                        num_chunks,
+                        chunk_size,
+                        k_head_dim,
+                        v_head_dim,
+                        initial_state.as_ptr() as *const c_void,
+                        weighted_key_scan.as_ptr() as *const c_void,
+                        k_cumdecay_scan.as_ptr() as *const c_void,
+                        q_state_scan.as_ptr() as *const c_void,
+                        local_attn_scan.as_ptr() as *const c_void,
+                        state_decay_scan.as_ptr() as *const c_void,
+                        value.as_ptr() as *const c_void,
+                        output.as_mut_ptr() as *mut c_void,
+                    )
+                };
+                if status != 0 {
+                    return Err(candle::hip::qwen35_error(self.name(), status));
+                }
+                let storage = <$ty as candle::WithDType>::to_cpu_storage_owned(output);
+                Ok((
+                    candle::HipStorage::wrap_cpu_storage(storage, device.clone()),
+                    out_shape.clone(),
+                ))
+            }};
+        }
+
+        match storage_dtype {
+            DType::F16 => launch!(half::f16, half::f16::from_bits(0)),
+            DType::F32 => launch!(f32, 0.0f32),
+            DType::BF16 => launch!(half::bf16, half::bf16::from_bits(0)),
+            other => candle::bail!("delta-full-scan unsupported dtype {other:?}"),
+        }
     }
 }
 
@@ -5122,6 +7406,809 @@ impl ModelForCausalLM {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hip")]
+    fn assert_close(lhs: &[f32], rhs: &[f32], tol: f32) {
+        assert_eq!(lhs.len(), rhs.len());
+        for (idx, (lhs, rhs)) in lhs.iter().zip(rhs.iter()).enumerate() {
+            let delta = (lhs - rhs).abs();
+            assert!(
+                delta <= tol,
+                "mismatch at {idx}: lhs={lhs} rhs={rhs} delta={delta} tol={tol}"
+            );
+        }
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_linear_prefill_conv_pack_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_size = 1usize;
+        let conv_dim = 2usize;
+        let total_len = 6usize;
+        let seq_len = 4usize;
+        let kernel_size = 3usize;
+
+        let mixed_qkv_data = vec![
+            0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, // channel 0
+            -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, // channel 1
+        ];
+        let weight_data = vec![
+            0.5f32, -0.25, 0.75, // channel 0
+            -0.4, 0.3, 0.2, // channel 1
+        ];
+        let mixed_qkv = Tensor::from_vec(
+            mixed_qkv_data.clone(),
+            (batch_size, conv_dim, total_len),
+            &device,
+        )?;
+        let weights = Tensor::from_vec(weight_data.clone(), (conv_dim, kernel_size), &device)?;
+        let output = linear_prefill_conv_pack(&mixed_qkv, &weights, seq_len, kernel_size)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = Vec::with_capacity(batch_size * seq_len * conv_dim);
+        for b in 0..batch_size {
+            for t in 0..seq_len {
+                for c in 0..conv_dim {
+                    let input_base = b * conv_dim * total_len + c * total_len;
+                    let weight_base = c * kernel_size;
+                    let mut acc = 0.0f32;
+                    for tap in 0..kernel_size {
+                        acc +=
+                            mixed_qkv_data[input_base + t + tap] * weight_data[weight_base + tap];
+                    }
+                    expected.push(acc / (1.0 + (-acc).exp()));
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_full_attention_prefill_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_size = 1usize;
+        let q_heads = 2usize;
+        let kv_heads = 1usize;
+        let q_len = 3usize;
+        let kv_len = 5usize;
+        let head_dim = 4usize;
+        let num_kv_groups = 2usize;
+        let scale = 0.5f32;
+        let seqlen_offset = 2usize;
+
+        let query_data = vec![
+            0.2f32, 0.0, 0.1, -0.1, 0.1, 0.3, -0.2, 0.0, 0.4, -0.1, 0.0, 0.2, // head 0
+            -0.2, 0.1, 0.0, 0.3, 0.2, -0.3, 0.1, 0.0, 0.0, 0.2, 0.2, -0.1, // head 1
+        ];
+        let key_data = vec![
+            0.1f32, 0.0, 0.2, -0.1, 0.0, 0.3, -0.2, 0.1, 0.2, -0.1, 0.0, 0.4, -0.3, 0.2, 0.1, 0.0,
+            0.1, 0.1, -0.1, 0.2,
+        ];
+        let value_data = vec![
+            0.0f32, 0.2, -0.1, 0.3, 0.1, -0.2, 0.0, 0.2, 0.4, 0.1, -0.3, 0.0, -0.1, 0.3, 0.2, -0.2,
+            0.2, 0.0, 0.1, 0.4,
+        ];
+
+        let query = Tensor::from_vec(
+            query_data.clone(),
+            (batch_size, q_heads, q_len, head_dim),
+            &device,
+        )?;
+        let key = Tensor::from_vec(
+            key_data.clone(),
+            (batch_size, kv_heads, kv_len, head_dim),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_size, kv_heads, kv_len, head_dim),
+            &device,
+        )?;
+        let output = full_attention_prefill_megakernel(
+            &query,
+            &key,
+            &value,
+            num_kv_groups,
+            scale,
+            seqlen_offset,
+        )?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = Vec::with_capacity(batch_size * q_heads * q_len * head_dim);
+        for b in 0..batch_size {
+            for q_head in 0..q_heads {
+                let kv_head = q_head / num_kv_groups;
+                for q_pos in 0..q_len {
+                    let causal_limit = kv_len.min(seqlen_offset + q_pos + 1);
+                    let query_offset = ((b * q_heads + q_head) * q_len + q_pos) * head_dim;
+                    let q_row = &query_data[query_offset..query_offset + head_dim];
+                    let key_head_offset = (b * kv_heads + kv_head) * kv_len * head_dim;
+                    let value_head_offset = key_head_offset;
+
+                    let mut max_score = f32::NEG_INFINITY;
+                    let mut denom = 0.0f32;
+                    let mut out_row = vec![0.0f32; head_dim];
+                    for k_pos in 0..causal_limit {
+                        let key_offset = key_head_offset + k_pos * head_dim;
+                        let value_offset = value_head_offset + k_pos * head_dim;
+                        let mut score = 0.0f32;
+                        for d in 0..head_dim {
+                            score += q_row[d] * key_data[key_offset + d];
+                        }
+                        score *= scale;
+
+                        if !max_score.is_finite() {
+                            max_score = score;
+                            denom = 1.0;
+                            out_row.copy_from_slice(
+                                &value_data[value_offset..value_offset + head_dim],
+                            );
+                            continue;
+                        }
+
+                        let new_max = max_score.max(score);
+                        let prev_scale = (max_score - new_max).exp();
+                        let curr_scale = (score - new_max).exp();
+                        denom = denom * prev_scale + curr_scale;
+                        for d in 0..head_dim {
+                            out_row[d] =
+                                out_row[d] * prev_scale + curr_scale * value_data[value_offset + d];
+                        }
+                        max_score = new_max;
+                    }
+
+                    let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+                    for value in out_row {
+                        expected.push(value * inv_denom);
+                    }
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_recurrent_prefill_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let seq_len = 3usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+
+        let initial_state_data = vec![0.1f32, -0.2, 0.05, 0.3];
+        let query_data = vec![0.2f32, -0.1, 0.0, 0.3, -0.2, 0.4];
+        let key_data = vec![0.1f32, 0.2, -0.3, 0.5, 0.4, -0.2];
+        let value_data = vec![0.3f32, -0.1, 0.2, 0.4, -0.2, 0.1];
+        let beta_data = vec![0.5f32, 0.25, 0.75];
+        let g_data = vec![0.0f32, -0.2, 0.1];
+
+        let initial_state = Tensor::from_vec(
+            initial_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let query = Tensor::from_vec(
+            query_data.clone(),
+            (batch_heads, seq_len, k_head_dim),
+            &device,
+        )?;
+        let key = Tensor::from_vec(
+            key_data.clone(),
+            (batch_heads, seq_len, k_head_dim),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, seq_len, v_head_dim),
+            &device,
+        )?;
+        let beta = Tensor::from_vec(beta_data.clone(), (batch_heads, seq_len), &device)?;
+        let g = Tensor::from_vec(g_data.clone(), (batch_heads, seq_len), &device)?;
+
+        let output = delta_recurrent_prefill(&initial_state, &query, &key, &value, &beta, &g)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = vec![0.0f32; batch_heads * (seq_len + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] = initial_state_data
+                        [bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let out_base = bh * (seq_len + k_head_dim) * v_head_dim;
+                for t in 0..seq_len {
+                    let g_t = g_data[bh * seq_len + t].exp();
+                    let key_row = bh * seq_len * k_head_dim + t * k_head_dim;
+                    let value_row = bh * seq_len * v_head_dim + t * v_head_dim;
+                    for entry in &mut state {
+                        *entry *= g_t;
+                    }
+                    let mut kv_mem = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        kv_mem += state[k_idx] * key_data[key_row + k_idx];
+                    }
+                    let delta =
+                        (value_data[value_row + v_idx] - kv_mem) * beta_data[bh * seq_len + t];
+                    for k_idx in 0..k_head_dim {
+                        state[k_idx] += key_data[key_row + k_idx] * delta;
+                    }
+                    let mut out_t = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        out_t += state[k_idx] * query_data[key_row + k_idx];
+                    }
+                    expected[out_base + t * v_head_dim + v_idx] = out_t;
+                }
+                let state_out = out_base + seq_len * v_head_dim;
+                for k_idx in 0..k_head_dim {
+                    expected[state_out + k_idx * v_head_dim + v_idx] = state[k_idx];
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_chunk_step_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let chunk_size = 3usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+
+        let prev_state_data = vec![0.15f32, -0.05, 0.2, 0.1];
+        let query_data = vec![0.1f32, 0.3, -0.2, 0.4, 0.5, -0.1];
+        let key_data = vec![0.2f32, -0.1, 0.0, 0.25, -0.3, 0.15];
+        let value_data = vec![0.4f32, 0.2, -0.1, 0.3, 0.05, -0.2];
+        let beta_data = vec![0.6f32, 0.5, 0.4];
+        let g_data = vec![-0.1f32, 0.0, 0.2];
+
+        let prev_state = Tensor::from_vec(
+            prev_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let query = Tensor::from_vec(
+            query_data.clone(),
+            (batch_heads, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let key = Tensor::from_vec(
+            key_data.clone(),
+            (batch_heads, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, chunk_size, v_head_dim),
+            &device,
+        )?;
+        let beta = Tensor::from_vec(beta_data.clone(), (batch_heads, chunk_size), &device)?;
+        let g = Tensor::from_vec(g_data.clone(), (batch_heads, chunk_size), &device)?;
+
+        let output = delta_chunk_step_raw(&prev_state, &query, &key, &value, &beta, &g)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = vec![0.0f32; batch_heads * (chunk_size + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] =
+                        prev_state_data[bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let out_base = bh * (chunk_size + k_head_dim) * v_head_dim;
+                for t in 0..chunk_size {
+                    let g_t = g_data[bh * chunk_size + t].exp();
+                    let key_row = bh * chunk_size * k_head_dim + t * k_head_dim;
+                    let value_row = bh * chunk_size * v_head_dim + t * v_head_dim;
+                    for entry in &mut state {
+                        *entry *= g_t;
+                    }
+                    let mut kv_mem = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        kv_mem += state[k_idx] * key_data[key_row + k_idx];
+                    }
+                    let delta =
+                        (value_data[value_row + v_idx] - kv_mem) * beta_data[bh * chunk_size + t];
+                    for k_idx in 0..k_head_dim {
+                        state[k_idx] += key_data[key_row + k_idx] * delta;
+                    }
+                    let mut out_t = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        out_t += state[k_idx] * query_data[key_row + k_idx];
+                    }
+                    expected[out_base + t * v_head_dim + v_idx] = out_t;
+                }
+                let state_out = out_base + chunk_size * v_head_dim;
+                for k_idx in 0..k_head_dim {
+                    expected[state_out + k_idx * v_head_dim + v_idx] = state[k_idx];
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_chunk_step_windowed_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let num_chunks = 2usize;
+        let chunk_size = 2usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+
+        let prev_state_data = vec![0.1f32, -0.1, 0.2, 0.05];
+        let query_data = vec![0.2f32, 0.1, -0.3, 0.4, 0.0, 0.25, 0.5, -0.2];
+        let key_data = vec![0.05f32, 0.2, -0.1, 0.3, 0.4, -0.2, 0.15, 0.1];
+        let value_data = vec![0.3f32, -0.2, 0.1, 0.5, -0.1, 0.2, 0.4, 0.0];
+        let beta_data = vec![0.5f32, 0.25, 0.75, 0.4];
+        let g_data = vec![0.0f32, -0.3, 0.2, 0.1];
+
+        let prev_state = Tensor::from_vec(
+            prev_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let query = Tensor::from_vec(
+            query_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let key = Tensor::from_vec(
+            key_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, num_chunks, chunk_size, v_head_dim),
+            &device,
+        )?;
+        let beta = Tensor::from_vec(
+            beta_data.clone(),
+            (batch_heads, num_chunks, chunk_size),
+            &device,
+        )?;
+        let g = Tensor::from_vec(
+            g_data.clone(),
+            (batch_heads, num_chunks, chunk_size),
+            &device,
+        )?;
+
+        let output = delta_chunk_step_windowed_raw(&prev_state, &query, &key, &value, &beta, &g)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let total_tokens = num_chunks * chunk_size;
+        let mut expected = vec![0.0f32; batch_heads * (total_tokens + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] =
+                        prev_state_data[bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let out_base = bh * (total_tokens + k_head_dim) * v_head_dim;
+                for t in 0..total_tokens {
+                    let key_row = bh * total_tokens * k_head_dim + t * k_head_dim;
+                    let value_row = bh * total_tokens * v_head_dim + t * v_head_dim;
+                    let g_t = g_data[bh * total_tokens + t].exp();
+                    for entry in &mut state {
+                        *entry *= g_t;
+                    }
+                    let mut kv_mem = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        kv_mem += state[k_idx] * key_data[key_row + k_idx];
+                    }
+                    let delta =
+                        (value_data[value_row + v_idx] - kv_mem) * beta_data[bh * total_tokens + t];
+                    for k_idx in 0..k_head_dim {
+                        state[k_idx] += key_data[key_row + k_idx] * delta;
+                    }
+                    let mut out_t = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        out_t += state[k_idx] * query_data[key_row + k_idx];
+                    }
+                    expected[out_base + t * v_head_dim + v_idx] = out_t;
+                }
+                let state_out = out_base + total_tokens * v_head_dim;
+                for k_idx in 0..k_head_dim {
+                    expected[state_out + k_idx * v_head_dim + v_idx] = state[k_idx];
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_chunk_scan_raw_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let num_chunks = 2usize;
+        let chunk_size = 2usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+
+        let initial_state_data = vec![0.05f32, 0.1, -0.2, 0.15];
+        let query_data = vec![0.1f32, -0.2, 0.3, 0.4, -0.1, 0.2, 0.5, -0.3];
+        let key_data = vec![0.2f32, 0.0, -0.15, 0.35, 0.25, -0.2, 0.1, 0.05];
+        let value_data = vec![0.3f32, 0.1, -0.2, 0.4, 0.05, -0.1, 0.2, 0.3];
+        let beta_data = vec![0.4f32, 0.7, 0.5, 0.6];
+        let g_data = vec![-0.2f32, 0.0, 0.1, -0.1];
+
+        let initial_state = Tensor::from_vec(
+            initial_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let query = Tensor::from_vec(
+            query_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let key = Tensor::from_vec(
+            key_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, num_chunks, chunk_size, v_head_dim),
+            &device,
+        )?;
+        let beta = Tensor::from_vec(
+            beta_data.clone(),
+            (batch_heads, num_chunks, chunk_size),
+            &device,
+        )?;
+        let g = Tensor::from_vec(
+            g_data.clone(),
+            (batch_heads, num_chunks, chunk_size),
+            &device,
+        )?;
+
+        let output = delta_chunk_scan_raw(&initial_state, &query, &key, &value, &beta, &g)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let total_tokens = num_chunks * chunk_size;
+        let mut expected = vec![0.0f32; batch_heads * (total_tokens + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] = initial_state_data
+                        [bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let out_base = bh * (total_tokens + k_head_dim) * v_head_dim;
+                for t in 0..total_tokens {
+                    let key_row = bh * total_tokens * k_head_dim + t * k_head_dim;
+                    let value_row = bh * total_tokens * v_head_dim + t * v_head_dim;
+                    let g_t = g_data[bh * total_tokens + t].exp();
+                    for entry in &mut state {
+                        *entry *= g_t;
+                    }
+                    let mut kv_mem = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        kv_mem += state[k_idx] * key_data[key_row + k_idx];
+                    }
+                    let delta =
+                        (value_data[value_row + v_idx] - kv_mem) * beta_data[bh * total_tokens + t];
+                    for k_idx in 0..k_head_dim {
+                        state[k_idx] += key_data[key_row + k_idx] * delta;
+                    }
+                    let mut out_t = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        out_t += state[k_idx] * query_data[key_row + k_idx];
+                    }
+                    expected[out_base + t * v_head_dim + v_idx] = out_t;
+                }
+                let state_out = out_base + total_tokens * v_head_dim;
+                for k_idx in 0..k_head_dim {
+                    expected[state_out + k_idx * v_head_dim + v_idx] = state[k_idx];
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_state_scan_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let num_chunks = 2usize;
+        let chunk_size = 2usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+        let packed_width = 2 * k_head_dim + 1;
+
+        let initial_state_data = vec![0.1f32, -0.2, 0.05, 0.15];
+        let packed_scan_data = vec![
+            0.2f32, -0.1, 0.05, 0.3, 0.9, -0.2, 0.4, 0.1, -0.05, 0.9, 0.3, 0.1, -0.15, 0.2, 0.8,
+            0.05, -0.25, 0.2, 0.1, 0.8,
+        ];
+        let value_data = vec![0.4f32, 0.1, -0.2, 0.3, 0.05, -0.1, 0.2, 0.25];
+
+        let initial_state = Tensor::from_vec(
+            initial_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let packed_scan = Tensor::from_vec(
+            packed_scan_data.clone(),
+            (batch_heads, num_chunks, chunk_size, packed_width),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, num_chunks, chunk_size, v_head_dim),
+            &device,
+        )?;
+
+        let output = delta_state_scan(&initial_state, &packed_scan, &value)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = vec![0.0f32; batch_heads * (num_chunks + 1) * k_head_dim * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    let idx = bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx;
+                    state[k_idx] = initial_state_data[idx];
+                    expected[idx] = state[k_idx];
+                }
+                for chunk in 0..num_chunks {
+                    let packed_chunk_base = ((bh * num_chunks) + chunk) * chunk_size * packed_width;
+                    let value_chunk_base = ((bh * num_chunks) + chunk) * chunk_size * v_head_dim;
+                    let state_decay = packed_scan_data[packed_chunk_base + 2 * k_head_dim];
+                    let mut update = vec![0.0f32; k_head_dim];
+                    for t in 0..chunk_size {
+                        let packed_row = packed_chunk_base + t * packed_width;
+                        let value_row = value_chunk_base + t * v_head_dim;
+                        let mut v_prime = 0.0f32;
+                        for k_idx in 0..k_head_dim {
+                            v_prime +=
+                                packed_scan_data[packed_row + k_head_dim + k_idx] * state[k_idx];
+                        }
+                        let v_new = value_data[value_row + v_idx] - v_prime;
+                        for k_idx in 0..k_head_dim {
+                            update[k_idx] += packed_scan_data[packed_row + k_idx] * v_new;
+                        }
+                    }
+                    let out_chunk_base =
+                        ((bh * (num_chunks + 1)) + (chunk + 1)) * k_head_dim * v_head_dim;
+                    for k_idx in 0..k_head_dim {
+                        state[k_idx] = state_decay * state[k_idx] + update[k_idx];
+                        expected[out_chunk_base + k_idx * v_head_dim + v_idx] = state[k_idx];
+                    }
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_chunk_fused_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let chunk_size = 2usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+        let packed_width = 3 * k_head_dim + 1;
+
+        let prev_state_data = vec![0.1f32, 0.2, -0.05, 0.15];
+        let packed_chunk_data = vec![
+            0.2f32, -0.1, 0.05, 0.3, 0.1, -0.2, 0.85, -0.15, 0.25, 0.2, -0.05, -0.1, 0.15, 0.85,
+        ];
+        let value_data = vec![0.35f32, -0.1, 0.05, 0.4];
+
+        let prev_state = Tensor::from_vec(
+            prev_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let packed_chunk = Tensor::from_vec(
+            packed_chunk_data.clone(),
+            (batch_heads, chunk_size, packed_width),
+            &device,
+        )?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, chunk_size, v_head_dim),
+            &device,
+        )?;
+
+        let output = delta_chunk_fused(&prev_state, &packed_chunk, &value)?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let mut expected = vec![0.0f32; batch_heads * (2 * chunk_size + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] =
+                        prev_state_data[bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let packed_base = bh * chunk_size * packed_width;
+                let value_base = bh * chunk_size * v_head_dim;
+                let out_base = bh * (2 * chunk_size + k_head_dim) * v_head_dim;
+                let mut v_new = vec![0.0f32; chunk_size];
+                let mut attn_inter = vec![0.0f32; chunk_size];
+                for t in 0..chunk_size {
+                    let packed_row = packed_base + t * packed_width;
+                    let mut v_prime = 0.0f32;
+                    let mut attn = 0.0f32;
+                    for k_idx in 0..k_head_dim {
+                        v_prime +=
+                            packed_chunk_data[packed_row + k_head_dim + k_idx] * state[k_idx];
+                        attn +=
+                            packed_chunk_data[packed_row + 2 * k_head_dim + k_idx] * state[k_idx];
+                    }
+                    v_new[t] = value_data[value_base + t * v_head_dim + v_idx] - v_prime;
+                    attn_inter[t] = attn;
+                    expected[out_base + t * v_head_dim + v_idx] = v_new[t];
+                    expected[out_base + (chunk_size + t) * v_head_dim + v_idx] = attn_inter[t];
+                }
+                let state_decay = packed_chunk_data[packed_base + 3 * k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    let mut update = 0.0f32;
+                    for t in 0..chunk_size {
+                        let packed_row = packed_base + t * packed_width;
+                        update += packed_chunk_data[packed_row + k_idx] * v_new[t];
+                    }
+                    expected[out_base + (2 * chunk_size + k_idx) * v_head_dim + v_idx] =
+                        state_decay * state[k_idx] + update;
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
+
+    #[cfg(feature = "hip")]
+    #[test]
+    fn hip_delta_full_scan_matches_reference() -> Result<()> {
+        let device = Device::new_hip(0)?;
+        let batch_heads = 1usize;
+        let num_chunks = 2usize;
+        let chunk_size = 2usize;
+        let k_head_dim = 2usize;
+        let v_head_dim = 2usize;
+
+        let initial_state_data = vec![0.15f32, -0.05, 0.2, 0.1];
+        let weighted_key_data = vec![0.2f32, -0.1, 0.05, 0.3, -0.2, 0.15, 0.25, -0.05];
+        let k_cumdecay_data = vec![0.1f32, 0.25, -0.2, 0.05, 0.15, -0.1, 0.05, 0.2];
+        let q_state_data = vec![0.05f32, -0.15, 0.2, 0.1, -0.1, 0.3, 0.15, -0.05];
+        let local_attn_data = vec![0.2f32, 0.1, -0.1, 0.3, 0.05, -0.2, 0.25, 0.15];
+        let state_decay_data = vec![0.85f32, 0.9];
+        let value_data = vec![0.3f32, 0.1, -0.2, 0.4, 0.05, -0.1, 0.2, 0.35];
+
+        let initial_state = Tensor::from_vec(
+            initial_state_data.clone(),
+            (batch_heads, k_head_dim, v_head_dim),
+            &device,
+        )?;
+        let weighted_key_scan = Tensor::from_vec(
+            weighted_key_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let k_cumdecay_scan = Tensor::from_vec(
+            k_cumdecay_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let q_state_scan = Tensor::from_vec(
+            q_state_data.clone(),
+            (batch_heads, num_chunks, chunk_size, k_head_dim),
+            &device,
+        )?;
+        let local_attn_scan = Tensor::from_vec(
+            local_attn_data.clone(),
+            (batch_heads, num_chunks, chunk_size, chunk_size),
+            &device,
+        )?;
+        let state_decay_scan =
+            Tensor::from_vec(state_decay_data.clone(), (batch_heads, num_chunks), &device)?;
+        let value = Tensor::from_vec(
+            value_data.clone(),
+            (batch_heads, num_chunks, chunk_size, v_head_dim),
+            &device,
+        )?;
+
+        let output = delta_full_scan(
+            &initial_state,
+            &weighted_key_scan,
+            &k_cumdecay_scan,
+            &q_state_scan,
+            &local_attn_scan,
+            &state_decay_scan,
+            &value,
+        )?;
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+
+        let token_count = num_chunks * chunk_size;
+        let mut expected = vec![0.0f32; batch_heads * (token_count + k_head_dim) * v_head_dim];
+        for bh in 0..batch_heads {
+            for v_idx in 0..v_head_dim {
+                let mut state = vec![0.0f32; k_head_dim];
+                for k_idx in 0..k_head_dim {
+                    state[k_idx] = initial_state_data
+                        [bh * k_head_dim * v_head_dim + k_idx * v_head_dim + v_idx];
+                }
+                let scan_base = bh * num_chunks * chunk_size * k_head_dim;
+                let local_base = bh * num_chunks * chunk_size * chunk_size;
+                let decay_base = bh * num_chunks;
+                let value_base = bh * token_count * v_head_dim;
+                let out_base = bh * (token_count + k_head_dim) * v_head_dim;
+                let mut v_new = vec![0.0f32; chunk_size];
+                let mut attn_inter = vec![0.0f32; chunk_size];
+                for chunk in 0..num_chunks {
+                    let chunk_scan = scan_base + chunk * chunk_size * k_head_dim;
+                    let chunk_local = local_base + chunk * chunk_size * chunk_size;
+                    let chunk_value = value_base + chunk * chunk_size * v_head_dim;
+                    for t in 0..chunk_size {
+                        let row = chunk_scan + t * k_head_dim;
+                        let mut v_prime = 0.0f32;
+                        let mut attn = 0.0f32;
+                        for k_idx in 0..k_head_dim {
+                            v_prime += k_cumdecay_data[row + k_idx] * state[k_idx];
+                            attn += q_state_data[row + k_idx] * state[k_idx];
+                        }
+                        v_new[t] = value_data[chunk_value + t * v_head_dim + v_idx] - v_prime;
+                        attn_inter[t] = attn;
+                    }
+                    for t in 0..chunk_size {
+                        let row = chunk_local + t * chunk_size;
+                        let mut local = 0.0f32;
+                        for s in 0..chunk_size {
+                            local += local_attn_data[row + s] * v_new[s];
+                        }
+                        expected[out_base + (chunk * chunk_size + t) * v_head_dim + v_idx] =
+                            attn_inter[t] + local;
+                    }
+                    let state_decay = state_decay_data[decay_base + chunk];
+                    for k_idx in 0..k_head_dim {
+                        let mut update = 0.0f32;
+                        for t in 0..chunk_size {
+                            let row = chunk_scan + t * k_head_dim;
+                            update += weighted_key_data[row + k_idx] * v_new[t];
+                        }
+                        state[k_idx] = state_decay * state[k_idx] + update;
+                    }
+                }
+                let state_out = out_base + token_count * v_head_dim;
+                for k_idx in 0..k_head_dim {
+                    expected[state_out + k_idx * v_head_dim + v_idx] = state[k_idx];
+                }
+            }
+        }
+
+        assert_close(&output, &expected, 1e-5);
+        Ok(())
+    }
 
     #[test]
     fn parses_nested_text_config() {
