@@ -9,6 +9,12 @@ pub struct HipDevice {
     ordinal: usize,
 }
 
+impl HipDevice {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HipStorage {
     storage: CpuStorage,
@@ -441,6 +447,7 @@ pub mod ffi {
     unsafe extern "C" {
         pub fn qwen35_hip_linear_prefill_conv_pack(
             dtype: c_int,
+            device_ordinal: usize,
             batch_size: usize,
             conv_dim: usize,
             total_len: usize,
@@ -453,6 +460,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_full_attention_prefill(
             dtype: c_int,
+            device_ordinal: usize,
             batch_size: usize,
             q_heads: usize,
             kv_heads: usize,
@@ -470,6 +478,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_recurrent_prefill(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             seq_len: usize,
             k_head_dim: usize,
@@ -485,6 +494,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_chunk_step(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             chunk_size: usize,
             k_head_dim: usize,
@@ -500,6 +510,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_chunk_windowed(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             num_chunks: usize,
             chunk_size: usize,
@@ -516,6 +527,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_chunk_scan_raw(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             num_chunks: usize,
             chunk_size: usize,
@@ -532,6 +544,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_state_scan(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             num_chunks: usize,
             chunk_size: usize,
@@ -545,6 +558,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_chunk_fused(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             chunk_size: usize,
             k_head_dim: usize,
@@ -557,6 +571,7 @@ pub mod ffi {
 
         pub fn qwen35_hip_delta_full_scan(
             dtype: c_int,
+            device_ordinal: usize,
             batch_heads: usize,
             num_chunks: usize,
             chunk_size: usize,

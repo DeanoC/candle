@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn detect_hip_arch() -> Option<String> {
@@ -34,15 +34,44 @@ fn run(cmd: &mut Command, context: &str) {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../candle-kernels/src/qwen35_delta.hip");
-    println!("cargo:rerun-if-changed=../candle-kernels/src/qwen35_delta_hip_bridge.cpp");
 
     if env::var_os("CARGO_FEATURE_HIP").is_none() {
         return;
     }
 
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+    let sibling_src_dir = manifest_dir.join("../candle-kernels/src");
+    let vendored_src_dir = manifest_dir.join("src/hip_vendor");
+    let sibling_kernel_src = sibling_src_dir.join("qwen35_delta.hip");
+    let sibling_bridge_src = sibling_src_dir.join("qwen35_delta_hip_bridge.cpp");
+    let vendored_kernel_src = vendored_src_dir.join("qwen35_delta.hip");
+    let vendored_bridge_src = vendored_src_dir.join("qwen35_delta_hip_bridge.cpp");
+
+    for path in [
+        &sibling_kernel_src,
+        &sibling_bridge_src,
+        &vendored_kernel_src,
+        &vendored_bridge_src,
+    ] {
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
+    let (src_dir, bridge_src) = if sibling_kernel_src.exists() && sibling_bridge_src.exists() {
+        (sibling_src_dir, sibling_bridge_src)
+    } else if vendored_kernel_src.exists() && vendored_bridge_src.exists() {
+        (vendored_src_dir, vendored_bridge_src)
+    } else {
+        panic!(
+            "unable to locate Qwen3.5 HIP sources; checked {} and {}",
+            sibling_src_dir.display(),
+            vendored_src_dir.display()
+        );
+    };
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let bridge_src = Path::new("../candle-kernels/src/qwen35_delta_hip_bridge.cpp");
     let bridge_obj = out_dir.join("qwen35_delta_hip_bridge.o");
     let bridge_lib = out_dir.join("libqwen35_hip.a");
 
@@ -52,11 +81,11 @@ fn main() {
         .arg("-O3")
         .arg("-fPIC")
         .arg("-I")
-        .arg("../candle-kernels/src")
+        .arg(&src_dir)
         .arg("-x")
         .arg("hip")
         .arg("-c")
-        .arg(bridge_src)
+        .arg(&bridge_src)
         .arg("-o")
         .arg(&bridge_obj);
     if let Some(arch) = detect_hip_arch() {

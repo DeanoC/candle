@@ -1033,6 +1033,7 @@ impl candle::CustomOp2 for LinearPrefillConvPack {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_linear_prefill_conv_pack(
                         dtype_code,
+                        device.ordinal(),
                         self.batch_size,
                         self.conv_dim,
                         self.total_len,
@@ -1410,6 +1411,7 @@ impl candle::CustomOp3 for FullAttentionPrefillMegakernel {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_full_attention_prefill(
                         dtype_code,
+                        device.ordinal(),
                         self.batch_size,
                         self.q_heads,
                         self.kv_heads,
@@ -1864,6 +1866,7 @@ impl candle::CustomOp3 for DeltaStateScan {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_state_scan(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         num_chunks,
                         chunk_size,
@@ -2155,6 +2158,7 @@ impl candle::CustomOp3 for DeltaChunkFused {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_chunk_fused(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         chunk_size,
                         k_head_dim,
@@ -2559,6 +2563,7 @@ impl candle::CustomOp6 for DeltaRecurrentPrefill {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_recurrent_prefill(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         seq_len,
                         k_head_dim,
@@ -3059,6 +3064,7 @@ impl candle::CustomOp6 for DeltaChunkStepRaw {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_chunk_step(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         chunk_size,
                         k_head_dim,
@@ -3597,6 +3603,7 @@ impl candle::CustomOp6 for DeltaChunkStepWindowedRaw {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_chunk_windowed(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         num_chunks,
                         chunk_size,
@@ -4335,6 +4342,7 @@ impl candle::CustomOp6 for DeltaChunkScanRaw {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_chunk_scan_raw(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         num_chunks,
                         chunk_size,
@@ -4845,6 +4853,7 @@ impl candle::CustomOp7 for DeltaFullScan {
                 let status = unsafe {
                     candle::hip::ffi::qwen35_hip_delta_full_scan(
                         dtype_code,
+                        device.ordinal(),
                         batch_heads,
                         num_chunks,
                         chunk_size,
