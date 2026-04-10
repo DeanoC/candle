@@ -585,10 +585,15 @@ fn use_delta_chunk_step_kernel(
     sequence_length: usize,
     chunk_size: usize,
 ) -> bool {
-    if !(matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal)
-        && sequence_length >= 2048
-        && chunk_size <= 24)
-    {
+    let scan_mode_supported = match device.location() {
+        DeviceLocation::Metal { .. } => matches!(scan_mode, DeltaNetScanMode::PrebatchedLocal),
+        DeviceLocation::Cuda { .. } => matches!(
+            scan_mode,
+            DeltaNetScanMode::Flat3d | DeltaNetScanMode::PrebatchedLocal
+        ),
+        _ => false,
+    };
+    if !(scan_mode_supported && sequence_length >= 2048 && chunk_size <= 24) {
         return false;
     }
 
