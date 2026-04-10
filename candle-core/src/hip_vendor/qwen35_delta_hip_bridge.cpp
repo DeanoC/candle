@@ -45,6 +45,221 @@ class ScopedHipDevice {
     hipError_t status_;
 };
 
+template <typename Src, typename Dst>
+int cast_contiguous_device(
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(elem_count != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elem_count + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_cast_kernel<Src, Dst>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            elem_count,
+            static_cast<const Src*>(src),
+            static_cast<Dst*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int sigmoid_contiguous_device(
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(elem_count != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elem_count + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_sigmoid_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            elem_count,
+            static_cast<const T*>(src),
+            static_cast<T*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int softmax_last_dim_device(
+    size_t device_ordinal,
+    size_t n_rows,
+    size_t n_cols,
+    const void* src,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(n_rows != 0 && n_cols != 0) {
+        constexpr int block = 256;
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_softmax_last_dim_kernel<T, block>),
+            dim3(static_cast<unsigned int>(n_rows)),
+            dim3(block),
+            0,
+            0,
+            n_rows,
+            n_cols,
+            static_cast<const T*>(src),
+            static_cast<T*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int rope_i_device(
+    size_t device_ordinal,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    const size_t elems = static_cast<size_t>(bh) * static_cast<size_t>(td) / 2;
+    if(elems != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elems + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_rope_i_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            static_cast<const T*>(src),
+            static_cast<const T*>(cos),
+            static_cast<const T*>(sin),
+            static_cast<T*>(dst),
+            bh,
+            td,
+            stride_b
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int rope_device(
+    size_t device_ordinal,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t d,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    const size_t elems = static_cast<size_t>(bh) * static_cast<size_t>(td) / 2;
+    if(elems != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elems + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_rope_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            static_cast<const T*>(src),
+            static_cast<const T*>(cos),
+            static_cast<const T*>(sin),
+            static_cast<T*>(dst),
+            bh,
+            td,
+            d,
+            stride_b
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int rope_thd_device(
+    size_t device_ordinal,
+    uint32_t b,
+    uint32_t t,
+    uint32_t h,
+    uint32_t d,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    const size_t elems = static_cast<size_t>(b) * static_cast<size_t>(t) * static_cast<size_t>(h) *
+        static_cast<size_t>(d) / 2;
+    if(elems != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elems + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_rope_thd_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            static_cast<const T*>(src),
+            static_cast<const T*>(cos),
+            static_cast<const T*>(sin),
+            static_cast<T*>(dst),
+            b,
+            t,
+            h,
+            d,
+            stride_b
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
 template <typename T, typename Kernel>
 int linear_prefill_conv_pack_host(
     size_t device_ordinal,
@@ -1504,6 +1719,162 @@ extern "C" int qwen35_hip_delta_full_scan(
                 batch_heads, num_chunks, chunk_size, k_head_dim, v_head_dim, initial_state,
                 weighted_key_scan, k_cumdecay_scan, q_state_scan, local_attn_scan,
                 state_decay_scan, value, out, delta_full_scan_bf16);
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_cast_contiguous(
+    int src_dtype,
+    int dst_dtype,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    void* dst
+) {
+    switch(src_dtype) {
+        case 0:
+            switch(dst_dtype) {
+                case 0: return cast_contiguous_device<half, half>(device_ordinal, elem_count, src, dst);
+                case 1: return cast_contiguous_device<half, float>(device_ordinal, elem_count, src, dst);
+                case 2: return cast_contiguous_device<half, hip_bfloat16>(device_ordinal, elem_count, src, dst);
+                case 3: return cast_contiguous_device<half, uint8_t>(device_ordinal, elem_count, src, dst);
+                default: return static_cast<int>(hipErrorInvalidValue);
+            }
+        case 1:
+            switch(dst_dtype) {
+                case 0: return cast_contiguous_device<float, half>(device_ordinal, elem_count, src, dst);
+                case 1: return cast_contiguous_device<float, float>(device_ordinal, elem_count, src, dst);
+                case 2: return cast_contiguous_device<float, hip_bfloat16>(device_ordinal, elem_count, src, dst);
+                case 3: return cast_contiguous_device<float, uint8_t>(device_ordinal, elem_count, src, dst);
+                default: return static_cast<int>(hipErrorInvalidValue);
+            }
+        case 2:
+            switch(dst_dtype) {
+                case 0: return cast_contiguous_device<hip_bfloat16, half>(device_ordinal, elem_count, src, dst);
+                case 1: return cast_contiguous_device<hip_bfloat16, float>(device_ordinal, elem_count, src, dst);
+                case 2: return cast_contiguous_device<hip_bfloat16, hip_bfloat16>(device_ordinal, elem_count, src, dst);
+                case 3: return cast_contiguous_device<hip_bfloat16, uint8_t>(device_ordinal, elem_count, src, dst);
+                default: return static_cast<int>(hipErrorInvalidValue);
+            }
+        case 3:
+            switch(dst_dtype) {
+                case 0: return cast_contiguous_device<uint8_t, half>(device_ordinal, elem_count, src, dst);
+                case 1: return cast_contiguous_device<uint8_t, float>(device_ordinal, elem_count, src, dst);
+                case 2: return cast_contiguous_device<uint8_t, hip_bfloat16>(device_ordinal, elem_count, src, dst);
+                case 3: return cast_contiguous_device<uint8_t, uint8_t>(device_ordinal, elem_count, src, dst);
+                default: return static_cast<int>(hipErrorInvalidValue);
+            }
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_sigmoid_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    void* dst
+) {
+    switch(dtype) {
+        case 0: return sigmoid_contiguous_device<half>(device_ordinal, elem_count, src, dst);
+        case 1: return sigmoid_contiguous_device<float>(device_ordinal, elem_count, src, dst);
+        case 2: return sigmoid_contiguous_device<hip_bfloat16>(device_ordinal, elem_count, src, dst);
+        default: return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_softmax_last_dim_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    size_t n_rows,
+    size_t n_cols,
+    const void* src,
+    void* dst
+) {
+    switch(dtype) {
+        case 0: return softmax_last_dim_device<half>(device_ordinal, n_rows, n_cols, src, dst);
+        case 1: return softmax_last_dim_device<float>(device_ordinal, n_rows, n_cols, src, dst);
+        case 2: return softmax_last_dim_device<hip_bfloat16>(device_ordinal, n_rows, n_cols, src, dst);
+        default: return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_rope_i_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    switch(dtype) {
+        case 0: return rope_i_device<half>(device_ordinal, bh, td, stride_b, src, cos, sin, dst);
+        case 1: return rope_i_device<float>(device_ordinal, bh, td, stride_b, src, cos, sin, dst);
+        case 2:
+            return rope_i_device<hip_bfloat16>(device_ordinal, bh, td, stride_b, src, cos, sin, dst);
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_rope_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t d,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    switch(dtype) {
+        case 0: return rope_device<half>(device_ordinal, bh, td, d, stride_b, src, cos, sin, dst);
+        case 1: return rope_device<float>(device_ordinal, bh, td, d, stride_b, src, cos, sin, dst);
+        case 2:
+            return rope_device<hip_bfloat16>(device_ordinal, bh, td, d, stride_b, src, cos, sin, dst);
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_rope_thd_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    uint32_t b,
+    uint32_t t,
+    uint32_t h,
+    uint32_t d,
+    uint32_t stride_b,
+    const void* src,
+    const void* cos,
+    const void* sin,
+    void* dst
+) {
+    switch(dtype) {
+        case 0:
+            return rope_thd_device<half>(device_ordinal, b, t, h, d, stride_b, src, cos, sin, dst);
+        case 1:
+            return rope_thd_device<float>(device_ordinal, b, t, h, d, stride_b, src, cos, sin, dst);
+        case 2:
+            return rope_thd_device<hip_bfloat16>(
+                device_ordinal,
+                b,
+                t,
+                h,
+                d,
+                stride_b,
+                src,
+                cos,
+                sin,
+                dst
+            );
         default:
             return static_cast<int>(hipErrorInvalidValue);
     }

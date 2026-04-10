@@ -1,7 +1,6 @@
 //! Tensor ops.
 //!
 
-use candle::backend::BackendStorage;
 use candle::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor, D};
 use rayon::prelude::*;
 
@@ -210,10 +209,40 @@ impl candle::CustomOp1 for Sigmoid {
         storage: &candle::HipStorage,
         layout: &Layout,
     ) -> Result<(candle::HipStorage, Shape)> {
-        let (cpu_storage, shape) = self.cpu_fwd(storage.cpu_storage(), layout)?;
-        let hip_storage =
-            candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
-        Ok((hip_storage, shape))
+        use candle::backend::{BackendDevice, BackendStorage};
+        if let Some((start, _end)) = layout.contiguous_offsets() {
+            let dtype = match candle::hip::hip_dtype_code(storage.dtype()) {
+                Ok(code) => code,
+                Err(_) => {
+                    let cpu = storage.to_cpu_storage()?;
+                    let (cpu_storage, shape) = self.cpu_fwd(&cpu, layout)?;
+                    let hip_storage =
+                        candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+                    return Ok((hip_storage, shape));
+                }
+            };
+            let output =
+                unsafe { storage.device().alloc_uninit(layout.shape(), storage.dtype())? };
+            let status = unsafe {
+                candle::hip::ffi::candle_hip_sigmoid_contiguous(
+                    dtype,
+                    storage.device().ordinal(),
+                    layout.shape().elem_count(),
+                    storage.raw_device_ptr_with_offset(start)?,
+                    output.raw_device_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(candle::hip::qwen35_error(self.name(), status));
+            }
+            Ok((output, layout.shape().clone()))
+        } else {
+            let cpu = storage.to_cpu_storage()?;
+            let (cpu_storage, shape) = self.cpu_fwd(&cpu, layout)?;
+            let hip_storage =
+                candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+            Ok((hip_storage, shape))
+        }
     }
 
     fn bwd(&self, _arg: &Tensor, res: &Tensor, grad_res: &Tensor) -> Result<Option<Tensor>> {
@@ -444,10 +473,43 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         storage: &candle::HipStorage,
         layout: &Layout,
     ) -> Result<(candle::HipStorage, Shape)> {
-        let (cpu_storage, shape) = self.cpu_fwd(storage.cpu_storage(), layout)?;
-        let hip_storage =
-            candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
-        Ok((hip_storage, shape))
+        use candle::backend::{BackendDevice, BackendStorage};
+        let Some((start, _end)) = layout.contiguous_offsets() else {
+            let cpu = storage.to_cpu_storage()?;
+            let (cpu_storage, shape) = self.cpu_fwd(&cpu, layout)?;
+            let hip_storage =
+                candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+            return Ok((hip_storage, shape));
+        };
+        let dtype = match candle::hip::hip_dtype_code(storage.dtype()) {
+            Ok(code) => code,
+            Err(_) => {
+                let cpu = storage.to_cpu_storage()?;
+                let (cpu_storage, shape) = self.cpu_fwd(&cpu, layout)?;
+                let hip_storage =
+                    candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+                return Ok((hip_storage, shape));
+            }
+        };
+        let dims = layout.shape().dims();
+        let n_cols = dims[dims.len() - 1];
+        let n_rows = layout.shape().elem_count() / n_cols;
+        let output =
+            unsafe { storage.device().alloc_uninit(layout.shape(), storage.dtype())? };
+        let status = unsafe {
+            candle::hip::ffi::candle_hip_softmax_last_dim_contiguous(
+                dtype,
+                storage.device().ordinal(),
+                n_rows,
+                n_cols,
+                storage.raw_device_ptr_with_offset(start)?,
+                output.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(candle::hip::qwen35_error("softmax-last-dim", status));
+        }
+        Ok((output, layout.shape().clone()))
     }
 }
 
