@@ -1,7 +1,9 @@
 #include <hip/hip_runtime.h>
 #include <limits.h>
+#include <rocblas/rocblas.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <type_traits>
 
 #include "qwen35_delta.hip"
 
@@ -255,6 +257,114 @@ int rope_thd_device(
         );
         err = hipGetLastError();
         if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int matmul_strided_batched_device(
+    size_t device_ordinal,
+    size_t batch_size,
+    size_t m,
+    size_t n,
+    size_t k,
+    int transa,
+    int transb,
+    int lda,
+    int ldb,
+    int ldc,
+    long long stride_a,
+    long long stride_b,
+    long long stride_c,
+    const void* a,
+    const void* b,
+    void* c
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+
+    rocblas_handle handle = nullptr;
+    rocblas_status roc_status = rocblas_create_handle(&handle);
+    if(roc_status != rocblas_status_success) {
+        return -1000 - static_cast<int>(roc_status);
+    }
+
+    const rocblas_operation op_a =
+        transa == 0 ? rocblas_operation_none : rocblas_operation_transpose;
+    const rocblas_operation op_b =
+        transb == 0 ? rocblas_operation_none : rocblas_operation_transpose;
+
+    if constexpr(std::is_same_v<T, float>) {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        roc_status = rocblas_sgemm_strided_batched(
+            handle,
+            op_a,
+            op_b,
+            static_cast<rocblas_int>(n),
+            static_cast<rocblas_int>(m),
+            static_cast<rocblas_int>(k),
+            &alpha,
+            static_cast<const float*>(a),
+            lda,
+            stride_a,
+            static_cast<const float*>(b),
+            ldb,
+            stride_b,
+            &beta,
+            static_cast<float*>(c),
+            ldc,
+            stride_c,
+            static_cast<rocblas_int>(batch_size)
+        );
+    } else {
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        const rocblas_datatype a_type = std::is_same_v<T, half>
+            ? rocblas_datatype_f16_r
+            : rocblas_datatype_bf16_r;
+        const rocblas_datatype compute_type = rocblas_datatype_f32_r;
+        roc_status = rocblas_gemm_strided_batched_ex(
+            handle,
+            op_a,
+            op_b,
+            static_cast<rocblas_int>(n),
+            static_cast<rocblas_int>(m),
+            static_cast<rocblas_int>(k),
+            &alpha,
+            a,
+            a_type,
+            lda,
+            stride_a,
+            b,
+            a_type,
+            ldb,
+            stride_b,
+            &beta,
+            c,
+            a_type,
+            ldc,
+            stride_c,
+            c,
+            a_type,
+            ldc,
+            stride_c,
+            static_cast<rocblas_int>(batch_size),
+            compute_type,
+            rocblas_gemm_algo_standard,
+            0,
+            0
+        );
+    }
+
+    const rocblas_status destroy_status = rocblas_destroy_handle(handle);
+    if(roc_status != rocblas_status_success) {
+        return -1000 - static_cast<int>(roc_status);
+    }
+    if(destroy_status != rocblas_status_success) {
+        return -1000 - static_cast<int>(destroy_status);
     }
     err = hipDeviceSynchronize();
     return static_cast<int>(err);
@@ -1874,6 +1984,88 @@ extern "C" int candle_hip_rope_thd_contiguous(
                 cos,
                 sin,
                 dst
+            );
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_matmul_strided_batched(
+    int dtype,
+    size_t device_ordinal,
+    size_t batch_size,
+    size_t m,
+    size_t n,
+    size_t k,
+    int transa,
+    int transb,
+    int lda,
+    int ldb,
+    int ldc,
+    long long stride_a,
+    long long stride_b,
+    long long stride_c,
+    const void* a,
+    const void* b,
+    void* c
+) {
+    switch(dtype) {
+        case 0:
+            return matmul_strided_batched_device<half>(
+                device_ordinal,
+                batch_size,
+                m,
+                n,
+                k,
+                transa,
+                transb,
+                lda,
+                ldb,
+                ldc,
+                stride_a,
+                stride_b,
+                stride_c,
+                a,
+                b,
+                c
+            );
+        case 1:
+            return matmul_strided_batched_device<float>(
+                device_ordinal,
+                batch_size,
+                m,
+                n,
+                k,
+                transa,
+                transb,
+                lda,
+                ldb,
+                ldc,
+                stride_a,
+                stride_b,
+                stride_c,
+                a,
+                b,
+                c
+            );
+        case 2:
+            return matmul_strided_batched_device<hip_bfloat16>(
+                device_ordinal,
+                batch_size,
+                m,
+                n,
+                k,
+                transa,
+                transb,
+                lda,
+                ldb,
+                ldc,
+                stride_a,
+                stride_b,
+                stride_c,
+                a,
+                b,
+                c
             );
         default:
             return static_cast<int>(hipErrorInvalidValue);

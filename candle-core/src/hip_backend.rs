@@ -223,6 +223,85 @@ impl HipStorage {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HipGemmConfig {
+    transa: c_int,
+    transb: c_int,
+    lda: c_int,
+    ldb: c_int,
+    ldc: c_int,
+    stride_a: i64,
+    stride_b: i64,
+    stride_c: i64,
+}
+
+fn hip_gemm_config(
+    (_b, m, n, k): (usize, usize, usize, usize),
+    lhs_l: &Layout,
+    rhs_l: &Layout,
+) -> Result<HipGemmConfig> {
+    let lhs_stride = lhs_l.stride();
+    let rhs_stride = rhs_l.stride();
+    let rhs_m1 = rhs_stride[rhs_stride.len() - 1];
+    let rhs_m2 = rhs_stride[rhs_stride.len() - 2];
+    let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
+    let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
+
+    let (lda, transa) = if (rhs_m1 == 1 || n == 1) && (rhs_m2 == n || k == 1) {
+        (n as c_int, 0)
+    } else if (rhs_m1 == k || n == 1) && (rhs_m2 == 1 || k == 1) {
+        (k as c_int, 1)
+    } else {
+        crate::bail!(
+            "hip matmul non-contiguous rhs layout: lhs={lhs_l:?} rhs={rhs_l:?} mnk=({m}, {n}, {k})"
+        )
+    };
+    let (ldb, transb) = if (lhs_m1 == 1 || k == 1) && (lhs_m2 == k || m == 1) {
+        (k as c_int, 0)
+    } else if (lhs_m1 == m || k == 1) && (lhs_m2 == 1 || m == 1) {
+        (m as c_int, 1)
+    } else {
+        crate::bail!(
+            "hip matmul non-contiguous lhs layout: lhs={lhs_l:?} rhs={rhs_l:?} mnk=({m}, {n}, {k})"
+        )
+    };
+
+    let stride_b: usize = match lhs_stride[..lhs_stride.len() - 2] {
+        [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
+        [_, stride] if lhs_l.dims()[0] == 1 => stride,
+        [stride, _] if lhs_l.dims()[1] == 1 => stride,
+        [stride] => stride,
+        [] => m * k,
+        _ => {
+            crate::bail!(
+                "hip matmul unsupported lhs batch stride: lhs={lhs_l:?} rhs={rhs_l:?} mnk=({m}, {n}, {k})"
+            )
+        }
+    };
+    let stride_a: usize = match rhs_stride[..rhs_stride.len() - 2] {
+        [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
+        [_, stride] if rhs_l.dims()[0] == 1 => stride,
+        [stride, _] if rhs_l.dims()[1] == 1 => stride,
+        [stride] => stride,
+        [] => n * k,
+        _ => {
+            crate::bail!(
+                "hip matmul unsupported rhs batch stride: lhs={lhs_l:?} rhs={rhs_l:?} mnk=({m}, {n}, {k})"
+            )
+        }
+    };
+    Ok(HipGemmConfig {
+        transa,
+        transb,
+        lda,
+        ldb,
+        ldc: n as c_int,
+        stride_a: stride_a as i64,
+        stride_b: stride_b as i64,
+        stride_c: (m * n) as i64,
+    })
+}
+
 impl BackendStorage for HipStorage {
     type Device = HipDevice;
 
@@ -520,7 +599,41 @@ impl BackendStorage for HipStorage {
         lhs_layout: &Layout,
         rhs_layout: &Layout,
     ) -> Result<Self> {
-        self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout))
+        if self.dtype != rhs.dtype {
+            return self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout));
+        }
+        let dtype = match hip_dtype_code(self.dtype) {
+            Ok(code @ (0..=2)) => code,
+            _ => return self.cpu_fallback_map2(rhs, |lhs, rhs| lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)),
+        };
+        let cfg = hip_gemm_config(bmnk, lhs_layout, rhs_layout)?;
+        let (b, m, n, _k) = bmnk;
+        let out = Self::alloc_uninit(&self.device, b * m * n, self.dtype)?;
+        let status = unsafe {
+            ffi::candle_hip_matmul_strided_batched(
+                dtype,
+                self.device.ordinal,
+                b,
+                m,
+                n,
+                bmnk.3,
+                cfg.transa,
+                cfg.transb,
+                cfg.lda,
+                cfg.ldb,
+                cfg.ldc,
+                cfg.stride_a,
+                cfg.stride_b,
+                cfg.stride_c,
+                rhs.raw_device_ptr_with_offset(rhs_layout.start_offset())?,
+                self.raw_device_ptr_with_offset(lhs_layout.start_offset())?,
+                out.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(qwen35_error("hip-matmul", status));
+        }
+        Ok(out)
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, layout: &Layout) -> Result<()> {
@@ -1213,6 +1326,26 @@ pub mod ffi {
             cos: *const c_void,
             sin: *const c_void,
             dst: *mut c_void,
+        ) -> c_int;
+
+        pub fn candle_hip_matmul_strided_batched(
+            dtype: c_int,
+            device_ordinal: usize,
+            batch_size: usize,
+            m: usize,
+            n: usize,
+            k: usize,
+            transa: c_int,
+            transb: c_int,
+            lda: c_int,
+            ldb: c_int,
+            ldc: c_int,
+            stride_a: i64,
+            stride_b: i64,
+            stride_c: i64,
+            a: *const c_void,
+            b: *const c_void,
+            c: *mut c_void,
         ) -> c_int;
     }
 }
