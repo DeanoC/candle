@@ -2,7 +2,10 @@ use crate::backend::BackendStorage;
 use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
 use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
-use crate::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
+use crate::{
+    CustomOp1, CustomOp2, CustomOp3, CustomOp4, CustomOp6, CustomOp7, InplaceOp1, InplaceOp2,
+    InplaceOp3,
+};
 
 // We do not want to implement Clone on Storage as cloning may fail because of
 // out of memory. Instead try_clone should be used.
@@ -266,6 +269,162 @@ impl Storage {
             }
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::Metal(s), shape))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn apply_op4(
+        &self,
+        l1: &Layout,
+        t2: &Self,
+        l2: &Layout,
+        t3: &Self,
+        l3: &Layout,
+        t4: &Self,
+        l4: &Layout,
+        c: &dyn CustomOp4,
+    ) -> Result<(Self, Shape)> {
+        self.same_device(t2, c.name())?;
+        self.same_device(t3, c.name())?;
+        self.same_device(t4, c.name())?;
+        match (self, t2, t3, t4) {
+            (Self::Cpu(s1), Self::Cpu(s2), Self::Cpu(s3), Self::Cpu(s4)) => {
+                let (s, shape) = c.cpu_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
+                Ok((Self::Cpu(s), shape))
+            }
+            (Self::Cuda(s1), Self::Cuda(s2), Self::Cuda(s3), Self::Cuda(s4)) => {
+                let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
+                Ok((Self::Cuda(s), shape))
+            }
+            (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3), Self::Metal(s4)) => {
+                let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
+                Ok((Self::Metal(s), shape))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn apply_op6(
+        &self,
+        l1: &Layout,
+        t2: &Self,
+        l2: &Layout,
+        t3: &Self,
+        l3: &Layout,
+        t4: &Self,
+        l4: &Layout,
+        t5: &Self,
+        l5: &Layout,
+        t6: &Self,
+        l6: &Layout,
+        c: &dyn CustomOp6,
+    ) -> Result<(Self, Shape)> {
+        self.same_device(t2, c.name())?;
+        self.same_device(t3, c.name())?;
+        self.same_device(t4, c.name())?;
+        self.same_device(t5, c.name())?;
+        self.same_device(t6, c.name())?;
+        match (self, t2, t3, t4, t5, t6) {
+            (
+                Self::Cpu(s1),
+                Self::Cpu(s2),
+                Self::Cpu(s3),
+                Self::Cpu(s4),
+                Self::Cpu(s5),
+                Self::Cpu(s6),
+            ) => {
+                let (s, shape) = c.cpu_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6)?;
+                Ok((Self::Cpu(s), shape))
+            }
+            (
+                Self::Cuda(s1),
+                Self::Cuda(s2),
+                Self::Cuda(s3),
+                Self::Cuda(s4),
+                Self::Cuda(s5),
+                Self::Cuda(s6),
+            ) => {
+                let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6)?;
+                Ok((Self::Cuda(s), shape))
+            }
+            (
+                Self::Metal(s1),
+                Self::Metal(s2),
+                Self::Metal(s3),
+                Self::Metal(s4),
+                Self::Metal(s5),
+                Self::Metal(s6),
+            ) => {
+                let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6)?;
+                Ok((Self::Metal(s), shape))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn apply_op7(
+        &self,
+        l1: &Layout,
+        t2: &Self,
+        l2: &Layout,
+        t3: &Self,
+        l3: &Layout,
+        t4: &Self,
+        l4: &Layout,
+        t5: &Self,
+        l5: &Layout,
+        t6: &Self,
+        l6: &Layout,
+        t7: &Self,
+        l7: &Layout,
+        c: &dyn CustomOp7,
+    ) -> Result<(Self, Shape)> {
+        self.same_device(t2, c.name())?;
+        self.same_device(t3, c.name())?;
+        self.same_device(t4, c.name())?;
+        self.same_device(t5, c.name())?;
+        self.same_device(t6, c.name())?;
+        self.same_device(t7, c.name())?;
+        match (self, t2, t3, t4, t5, t6, t7) {
+            (
+                Self::Cpu(s1),
+                Self::Cpu(s2),
+                Self::Cpu(s3),
+                Self::Cpu(s4),
+                Self::Cpu(s5),
+                Self::Cpu(s6),
+                Self::Cpu(s7),
+            ) => {
+                let (s, shape) =
+                    c.cpu_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6, s7, l7)?;
+                Ok((Self::Cpu(s), shape))
+            }
+            (
+                Self::Cuda(s1),
+                Self::Cuda(s2),
+                Self::Cuda(s3),
+                Self::Cuda(s4),
+                Self::Cuda(s5),
+                Self::Cuda(s6),
+                Self::Cuda(s7),
+            ) => {
+                let (s, shape) =
+                    c.cuda_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6, s7, l7)?;
+                Ok((Self::Cuda(s), shape))
+            }
+            (
+                Self::Metal(s1),
+                Self::Metal(s2),
+                Self::Metal(s3),
+                Self::Metal(s4),
+                Self::Metal(s5),
+                Self::Metal(s6),
+                Self::Metal(s7),
+            ) => {
+                let (s, shape) =
+                    c.metal_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6, s7, l7)?;
                 Ok((Self::Metal(s), shape))
             }
             _ => unreachable!(),
