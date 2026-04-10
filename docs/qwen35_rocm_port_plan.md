@@ -29,7 +29,7 @@ These pieces must be reimplemented per backend:
 
 ## Current ROCm milestone
 
-The first milestone on this machine is intentionally smaller than the CUDA branch:
+The current milestone on this machine is intentionally smaller than the CUDA branch:
 
 1. Add a first-class `Hip` seam to `candle-core`
    - `DeviceLocation::Hip`
@@ -39,15 +39,25 @@ The first milestone on this machine is intentionally smaller than the CUDA branc
    - `hip_fwd` hooks on `CustomOp*` and `InplaceOp*`
    - explicit `NotCompiledWithHipSupport` errors
 
-2. Add a HIP kernel source that mirrors the Qwen3.5 CUDA entry-point surface
+2. Keep generic HIP tensors correctness-first
+   - `HipStorage` is currently CPU-backed for generic Candle ops
+   - this keeps the model runnable before a full ROCm tensor backend exists
+
+3. Add a HIP kernel source that mirrors the Qwen3.5 CUDA entry-point surface
    - `linear_prefill_conv_pack_*`
    - `full_attention_prefill_*`
    - all DeltaNet kernel names preserved as ROCm placeholders for now
 
-3. Keep runtime behavior unchanged
+4. Call real HIP kernels from Qwen custom ops through a small `hipcc` bridge
+   - packed linear-prefill is wired
+   - full-attention prefill is wired
+   - both paths are parity-tested on this ROCm machine
+
+5. Keep runtime behavior constrained
    - Metal path remains the default mature implementation
    - CUDA branch remains separate
-   - no DotCache ROCm runtime changes until Candle has a real HIP backend
+   - DeltaNet HIP fast paths remain disabled until their kernels are implemented
+   - no DotCache ROCm runtime changes until more of Candle is truly GPU-resident
 
 ## Kernel plan
 
@@ -55,13 +65,13 @@ The first milestone on this machine is intentionally smaller than the CUDA branc
 
 - Reuse the CUDA algorithm directly.
 - The current HIP file already contains a compileable version of the dense-control prefill kernel.
-- Next step: wire this through a real HIP custom-op path in `qwen3_5.rs`.
+- It is now wired through `qwen3_5.rs` via a host-side HIP bridge and validated against a scalar reference test.
 
 ### Packed linear-prefill path
 
 - Reuse the CUDA loop structure directly.
 - The current HIP file already contains a compileable version of the packed linear-prefill kernel.
-- Next step: add HIP launch glue and tensor layout validation alongside the future HIP backend.
+- It is now wired through `qwen3_5.rs` via a host-side HIP bridge and validated against a scalar reference test.
 
 ### DeltaNet chunk-step / long-context path
 
@@ -81,15 +91,18 @@ These are the exact first files for the ROCm branch:
 - `candle-core/src/storage.rs`
 - `candle-core/src/custom_op.rs`
 - `candle-core/src/error.rs`
+- `candle-core/src/hip_backend.rs`
 - `candle-core/src/dummy_hip_backend.rs`
 - `candle-core/src/quantized/dummy_hip.rs`
+- `candle-core/build.rs`
 - `candle-kernels/src/qwen35_delta.hip`
+- `candle-kernels/src/qwen35_delta_hip_bridge.cpp`
 - `candle-kernels/scripts/qwen35_hip_smoke.sh`
+- `candle-transformers/src/models/qwen3_5.rs`
 
 The first runtime integration files after that should be:
 
-- `candle-transformers/src/models/qwen3_5.rs`
-- a future `candle-core/src/hip_backend/*`
+- a future GPU-resident `candle-core/src/hip_backend/*`
 - then DotCache benchmark / acceptance entry points
 
 ## Local validation on this ROCm host
@@ -98,6 +111,10 @@ Current local validation is:
 
 - `cargo check -p candle-core`
 - `cargo check -p candle-transformers`
+- `cargo check -p candle-core --features hip`
+- `cargo check -p candle-transformers --features hip`
+- `cargo test -p candle-transformers --features hip hip_linear_prefill_conv_pack_matches_reference -- --nocapture`
+- `cargo test -p candle-transformers --features hip hip_full_attention_prefill_matches_reference -- --nocapture`
 - `candle-kernels/scripts/qwen35_hip_smoke.sh`
 
-This is enough to keep the branch honest while the real HIP backend is still missing.
+This is enough to keep the branch honest while the generic GPU-resident HIP backend is still missing.
