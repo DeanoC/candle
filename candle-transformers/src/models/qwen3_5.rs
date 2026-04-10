@@ -4265,8 +4265,10 @@ impl FullAttention {
         let input_layout_elapsed = profile_elapsed(input_layout_start, device)?;
         profile.layout_prepare_millis += input_layout_elapsed;
         profile.full_attention_input_layout_millis += input_layout_elapsed;
+        let can_use_prefill_megakernel = self.head_dim <= 128;
 
-        let attn_output = if use_full_attention_prefill_megakernel(
+        let attn_output = if can_use_prefill_megakernel
+            && use_full_attention_prefill_megakernel(
             device,
             q_len,
             key_states.dim(2)?,
