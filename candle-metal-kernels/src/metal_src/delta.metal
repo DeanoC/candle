@@ -2,6 +2,47 @@
 using namespace metal;
 
 template <typename T, typename AccumT>
+kernel void linear_prefill_conv_pack(
+    constant size_t &batch_size,
+    constant size_t &conv_dim,
+    constant size_t &total_len,
+    constant size_t &seq_len,
+    constant size_t &kernel_size,
+    device const T *mixed_qkv,
+    device const T *weights,
+    device T *out,
+    uint tid [[thread_position_in_grid]]
+) {
+    const size_t output_elems = batch_size * seq_len * conv_dim;
+    if (tid >= output_elems) {
+        return;
+    }
+
+    const size_t b = tid / (seq_len * conv_dim);
+    const size_t rem = tid - b * seq_len * conv_dim;
+    const size_t t = rem / conv_dim;
+    const size_t c = rem - t * conv_dim;
+
+    const size_t input_b_offset = b * conv_dim * total_len;
+    const size_t input_c_offset = input_b_offset + c * total_len;
+    const size_t weight_offset = c * kernel_size;
+
+    AccumT acc = AccumT(0);
+    for (size_t tap = 0; tap < kernel_size; ++tap) {
+        acc += AccumT(mixed_qkv[input_c_offset + t + tap]) * AccumT(weights[weight_offset + tap]);
+    }
+
+    const AccumT silu = acc / (AccumT(1) + exp(-acc));
+    out[tid] = T(silu);
+}
+
+template [[host_name("linear_prefill_conv_pack_f16")]] [[kernel]] decltype(linear_prefill_conv_pack<half, float>) linear_prefill_conv_pack<half, float>;
+template [[host_name("linear_prefill_conv_pack_f32")]] [[kernel]] decltype(linear_prefill_conv_pack<float, float>) linear_prefill_conv_pack<float, float>;
+#if defined(__HAVE_BFLOAT__)
+template [[host_name("linear_prefill_conv_pack_bf16")]] [[kernel]] decltype(linear_prefill_conv_pack<bfloat, float>) linear_prefill_conv_pack<bfloat, float>;
+#endif
+
+template <typename T, typename AccumT>
 kernel void delta_state_update(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -117,7 +158,7 @@ template [[host_name("delta_recurrent_prefill_f32")]] [[kernel]] decltype(delta_
 template [[host_name("delta_recurrent_prefill_bf16")]] [[kernel]] decltype(delta_recurrent_prefill<bfloat, float>) delta_recurrent_prefill<bfloat, float>;
 #endif
 
-template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_step(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -328,7 +369,7 @@ template [[host_name("delta_chunk_step_bf16")]] [[kernel]] decltype(delta_chunk_
 #endif
 
 
-template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_step_windowed(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -542,7 +583,7 @@ template [[host_name("delta_chunk_step_windowed_f32")]] [[kernel]] decltype(delt
 template [[host_name("delta_chunk_step_windowed_bf16")]] [[kernel]] decltype(delta_chunk_step_windowed<bfloat, float>) delta_chunk_step_windowed<bfloat, float>;
 #endif
 
-template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_readout(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -715,7 +756,7 @@ template [[host_name("delta_chunk_readout_f32")]] [[kernel]] decltype(delta_chun
 template [[host_name("delta_chunk_readout_bf16")]] [[kernel]] decltype(delta_chunk_readout<bfloat, float>) delta_chunk_readout<bfloat, float>;
 #endif
 
-template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_readout_split(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -890,7 +931,7 @@ template [[host_name("delta_chunk_readout_split_f32")]] [[kernel]] decltype(delt
 template [[host_name("delta_chunk_readout_split_bf16")]] [[kernel]] decltype(delta_chunk_readout_split<bfloat, float>) delta_chunk_readout_split<bfloat, float>;
 #endif
 
-template <typename T, typename AccumT, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_state_update_raw(
     constant size_t &batch_heads,
     constant size_t &chunk_size,
@@ -1148,7 +1189,221 @@ template [[host_name("delta_chunk_step_2d_f32")]] [[kernel]] decltype(delta_chun
 template [[host_name("delta_chunk_step_2d_bf16")]] [[kernel]] decltype(delta_chunk_step_2d<bfloat, float>) delta_chunk_step_2d<bfloat, float>;
 #endif
 
-template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 16>
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24, ushort MAX_V = 24, ushort MAX_K_WORKERS = 2>
+kernel void delta_chunk_step_windowed_2d(
+    constant size_t &batch_heads,
+    constant size_t &chunk_size,
+    constant size_t &k_head_dim,
+    constant size_t &v_head_dim,
+    constant size_t &prev_state_bh_stride,
+    constant size_t &query_bh_stride,
+    constant size_t &value_bh_stride,
+    constant size_t &scalar_bh_stride,
+    constant size_t &output_total_rows,
+    constant size_t &output_token_row_offset,
+    constant size_t &output_state_row_offset,
+    device const T *prev_state,
+    device const T *query,
+    device const T *key,
+    device const T *value,
+    device const T *beta,
+    device const T *g,
+    device T *out,
+    uint2 tid2 [[thread_position_in_threadgroup]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 threads_per_group [[threads_per_threadgroup]]
+) {
+    if (group_id.x >= batch_heads || chunk_size > MAX_CHUNK || k_head_dim > MAX_K) {
+        return;
+    }
+
+    const size_t linear_tid = tid2.y * threads_per_group.x + tid2.x;
+    const size_t threads_in_group = threads_per_group.x * threads_per_group.y;
+    const size_t bh = group_id.x;
+    const size_t v_tile_start = group_id.y * MAX_V;
+    if (v_tile_start >= v_head_dim) {
+        return;
+    }
+    const size_t v_tile_width = min((size_t)MAX_V, v_head_dim - v_tile_start);
+    const size_t query_base = bh * query_bh_stride;
+    const size_t key_base = bh * query_bh_stride;
+    const size_t value_base = bh * value_bh_stride;
+    const size_t scalar_base = bh * scalar_bh_stride;
+    const size_t prev_base = bh * prev_state_bh_stride;
+    const size_t out_base = bh * output_total_rows * v_head_dim;
+    const size_t k_workers = max((size_t)1, min((size_t)threads_per_group.y, (size_t)MAX_K_WORKERS));
+    const size_t k_slice = (k_head_dim + k_workers - 1) / k_workers;
+    const size_t k_begin = tid2.y * k_slice;
+    const size_t k_end = min(k_head_dim, k_begin + k_slice);
+    const bool active_v = tid2.x < v_tile_width;
+
+    threadgroup AccumT tg_attn[MAX_CHUNK][MAX_CHUNK];
+    threadgroup AccumT tg_local_attn[MAX_CHUNK][MAX_CHUNK];
+    threadgroup AccumT tg_k_cumdecay[MAX_CHUNK][MAX_K];
+    threadgroup AccumT tg_exp_g[MAX_CHUNK];
+    threadgroup AccumT tg_row[MAX_CHUNK];
+    threadgroup AccumT tg_state_decay[1];
+    threadgroup AccumT tg_reduce_vprime[MAX_V][MAX_K_WORKERS];
+    threadgroup AccumT tg_reduce_attn[MAX_V][MAX_K_WORKERS];
+    threadgroup AccumT tg_v_new[MAX_CHUNK][MAX_V];
+
+    if (tid2.x == 0 && tid2.y == 0) {
+        AccumT g_cum[MAX_CHUNK];
+        AccumT exp_g_last = AccumT(1);
+        for (size_t t = 0; t < chunk_size; ++t) {
+            const AccumT g_value = AccumT(g[scalar_base + t]);
+            g_cum[t] = t == 0 ? g_value : g_cum[t - 1] + g_value;
+            tg_exp_g[t] = exp(g_cum[t]);
+            exp_g_last = tg_exp_g[t];
+        }
+        tg_state_decay[0] = exp_g_last;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (size_t index = linear_tid; index < chunk_size * chunk_size; index += threads_in_group) {
+        const size_t t = index / chunk_size;
+        const size_t s = index - t * chunk_size;
+        tg_attn[t][s] = AccumT(0);
+        tg_local_attn[t][s] = AccumT(0);
+    }
+    for (size_t index = linear_tid; index < chunk_size * k_head_dim; index += threads_in_group) {
+        const size_t t = index / k_head_dim;
+        const size_t k_idx = index - t * k_head_dim;
+        tg_k_cumdecay[t][k_idx] = AccumT(0);
+    }
+    for (size_t index = linear_tid; index < chunk_size * v_tile_width; index += threads_in_group) {
+        const size_t t = index / v_tile_width;
+        const size_t local_v_idx = index - t * v_tile_width;
+        tg_v_new[t][local_v_idx] = AccumT(0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid2.x == 0 && tid2.y == 0) {
+        tg_attn[0][0] = AccumT(1);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (size_t t = 1; t < chunk_size; ++t) {
+        if (linear_tid < t) {
+            const size_t s = linear_tid;
+            AccumT dot_k = AccumT(0);
+            AccumT dot_q = AccumT(0);
+            const AccumT decay = tg_exp_g[t] / tg_exp_g[s];
+            for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+                const AccumT key_t = AccumT(key[key_base + t * k_head_dim + k_idx]);
+                const AccumT key_s = AccumT(key[key_base + s * k_head_dim + k_idx]);
+                const AccumT query_t = AccumT(query[query_base + t * k_head_dim + k_idx]);
+                dot_k += key_t * AccumT(beta[scalar_base + t]) * key_s;
+                dot_q += query_t * key_s;
+            }
+            tg_row[s] = -dot_k * decay;
+            tg_local_attn[t][s] = dot_q * decay;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (linear_tid < t) {
+            const size_t s = linear_tid;
+            AccumT correction = AccumT(0);
+            for (size_t m = 0; m < t; ++m) {
+                correction += tg_row[m] * tg_attn[m][s];
+            }
+            tg_attn[t][s] = tg_row[s] + correction;
+        } else if (linear_tid == t) {
+            tg_attn[t][t] = AccumT(1);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (size_t index = linear_tid; index < chunk_size * k_head_dim; index += threads_in_group) {
+        const size_t t = index / k_head_dim;
+        const size_t k_idx = index - t * k_head_dim;
+        AccumT acc = AccumT(0);
+        for (size_t s = 0; s <= t; ++s) {
+            const AccumT key_s = AccumT(key[key_base + s * k_head_dim + k_idx]);
+            const AccumT beta_s = AccumT(beta[scalar_base + s]);
+            acc += tg_attn[t][s] * key_s * beta_s * tg_exp_g[s];
+        }
+        tg_k_cumdecay[t][k_idx] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const size_t local_v_idx = tid2.x;
+    const size_t v_idx = v_tile_start + local_v_idx;
+    const size_t local_k_count = k_end > k_begin ? (k_end - k_begin) : 0;
+    AccumT state_local[MAX_K / MAX_K_WORKERS];
+    if (active_v) {
+        for (size_t local_k = 0; local_k < local_k_count; ++local_k) {
+            const size_t k_idx = k_begin + local_k;
+            state_local[local_k] = AccumT(prev_state[prev_base + k_idx * v_head_dim + v_idx]);
+        }
+    }
+
+    if (active_v) {
+        for (size_t t = 0; t < chunk_size; ++t) {
+            AccumT partial_v_prime = AccumT(0);
+            AccumT partial_attn = AccumT(0);
+            const size_t q_row = query_base + t * k_head_dim;
+            const AccumT exp_g_t = tg_exp_g[t];
+            for (size_t local_k = 0; local_k < local_k_count; ++local_k) {
+                const size_t k_idx = k_begin + local_k;
+                const AccumT state_value = state_local[local_k];
+                partial_v_prime += tg_k_cumdecay[t][k_idx] * state_value;
+                partial_attn += AccumT(query[q_row + k_idx]) * exp_g_t * state_value;
+            }
+            tg_reduce_vprime[local_v_idx][tid2.y] = partial_v_prime;
+            tg_reduce_attn[local_v_idx][tid2.y] = partial_attn;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (tid2.y == 0) {
+                AccumT solved_v = AccumT(0);
+                for (size_t s = 0; s <= t; ++s) {
+                    solved_v += tg_attn[t][s]
+                        * AccumT(value[value_base + s * v_head_dim + v_idx])
+                        * AccumT(beta[scalar_base + s]);
+                }
+
+                AccumT v_prime = AccumT(0);
+                AccumT attn_inter = AccumT(0);
+                for (size_t worker = 0; worker < k_workers; ++worker) {
+                    v_prime += tg_reduce_vprime[local_v_idx][worker];
+                    attn_inter += tg_reduce_attn[local_v_idx][worker];
+                }
+
+                const AccumT v_new = solved_v - v_prime;
+                tg_v_new[t][local_v_idx] = v_new;
+
+                AccumT local = AccumT(0);
+                for (size_t s = 0; s < t; ++s) {
+                    local += tg_local_attn[t][s] * tg_v_new[s][local_v_idx];
+                }
+                out[out_base + (output_token_row_offset + t) * v_head_dim + v_idx] =
+                    T(attn_inter + local);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        for (size_t local_k = 0; local_k < local_k_count; ++local_k) {
+            const size_t k_idx = k_begin + local_k;
+            AccumT update = AccumT(0);
+            for (size_t t = 0; t < chunk_size; ++t) {
+                const AccumT weighted_key = AccumT(key[key_base + t * k_head_dim + k_idx])
+                    * (tg_state_decay[0] / tg_exp_g[t]);
+                update += weighted_key * tg_v_new[t][local_v_idx];
+            }
+            out[out_base + (output_state_row_offset + k_idx) * v_head_dim + v_idx] =
+                T(tg_state_decay[0] * state_local[local_k] + update);
+        }
+    }
+}
+
+template [[host_name("delta_chunk_step_windowed_2d_f16")]] [[kernel]] decltype(delta_chunk_step_windowed_2d<half, float>) delta_chunk_step_windowed_2d<half, float>;
+template [[host_name("delta_chunk_step_windowed_2d_f32")]] [[kernel]] decltype(delta_chunk_step_windowed_2d<float, float>) delta_chunk_step_windowed_2d<float, float>;
+#if defined(__HAVE_BFLOAT__)
+template [[host_name("delta_chunk_step_windowed_2d_bf16")]] [[kernel]] decltype(delta_chunk_step_windowed_2d<bfloat, float>) delta_chunk_step_windowed_2d<bfloat, float>;
+#endif
+
+template <typename T, typename AccumT, ushort MAX_K = 256, ushort MAX_CHUNK = 24>
 kernel void delta_chunk_scan_raw(
     constant size_t &batch_heads,
     constant size_t &num_chunks,

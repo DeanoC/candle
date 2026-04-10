@@ -5,6 +5,65 @@ use objc2_metal::MTLResourceUsage;
 use objc2_metal::MTLSize;
 
 #[allow(clippy::too_many_arguments)]
+pub fn call_linear_prefill_conv_pack(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    dtype: DType,
+    batch_size: usize,
+    conv_dim: usize,
+    total_len: usize,
+    seq_len: usize,
+    kernel_size: usize,
+    mixed_qkv: BufferOffset,
+    weights: BufferOffset,
+    output: &Buffer,
+) -> Result<(), MetalKernelError> {
+    let kernel_name = match dtype {
+        DType::F16 => "linear_prefill_conv_pack_f16",
+        DType::F32 => "linear_prefill_conv_pack_f32",
+        DType::BF16 => "linear_prefill_conv_pack_bf16",
+        other => {
+            return Err(MetalKernelError::UnsupportedDTypeForOp(
+                match other {
+                    DType::U8 => "u8",
+                    DType::U32 => "u32",
+                    DType::I64 => "i64",
+                    DType::BF16 => "bf16",
+                    DType::F16 => "f16",
+                    DType::F32 => "f32",
+                },
+                "linear_prefill_conv_pack",
+            ));
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, Source::Delta, kernel_name)?;
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoder = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+    let threads = batch_size * seq_len * conv_dim;
+    set_params!(
+        encoder,
+        (
+            batch_size,
+            conv_dim,
+            total_len,
+            seq_len,
+            kernel_size,
+            &mixed_qkv,
+            &weights,
+            output
+        )
+    );
+    let (thread_group_count, thread_group_size) = linear_split(&pipeline, threads);
+    encoder.use_resource(mixed_qkv.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(weights.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(output, MTLResourceUsage::Write);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn call_delta_recurrent_prefill(
     device: &Device,
     ep: impl EncoderProvider,
@@ -239,6 +298,105 @@ pub fn call_delta_chunk_step_windowed(
     let thread_group_size = MTLSize {
         width: group_width,
         height: 1,
+        depth: 1,
+    };
+
+    encoder.use_resource(prev_state.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(query.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(key.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(value.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(beta.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(g.buffer, MTLResourceUsage::Read);
+    encoder.use_resource(output, MTLResourceUsage::Write);
+    encoder.dispatch_thread_groups(thread_group_count, thread_group_size);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn call_delta_chunk_step_windowed_2d(
+    device: &Device,
+    ep: impl EncoderProvider,
+    kernels: &Kernels,
+    dtype: DType,
+    batch_heads: usize,
+    chunk_size: usize,
+    k_head_dim: usize,
+    v_head_dim: usize,
+    prev_state_bh_stride: usize,
+    query_bh_stride: usize,
+    value_bh_stride: usize,
+    scalar_bh_stride: usize,
+    output_total_rows: usize,
+    output_token_row_offset: usize,
+    output_state_row_offset: usize,
+    prev_state: BufferOffset,
+    query: BufferOffset,
+    key: BufferOffset,
+    value: BufferOffset,
+    beta: BufferOffset,
+    g: BufferOffset,
+    output: &Buffer,
+) -> Result<(), MetalKernelError> {
+    let kernel_name = match dtype {
+        DType::F16 => "delta_chunk_step_windowed_2d_f16",
+        DType::F32 => "delta_chunk_step_windowed_2d_f32",
+        DType::BF16 => "delta_chunk_step_windowed_2d_bf16",
+        other => {
+            return Err(MetalKernelError::UnsupportedDTypeForOp(
+                match other {
+                    DType::U8 => "u8",
+                    DType::U32 => "u32",
+                    DType::I64 => "i64",
+                    DType::BF16 => "bf16",
+                    DType::F16 => "f16",
+                    DType::F32 => "f32",
+                },
+                "delta_chunk_step_windowed_2d",
+            ));
+        }
+    };
+    let pipeline = kernels.load_pipeline(device, Source::Delta, kernel_name)?;
+    let encoder = ep.encoder();
+    let encoder: &ComputeCommandEncoder = encoder.as_ref();
+    encoder.set_compute_pipeline_state(&pipeline);
+    set_params!(
+        encoder,
+        (
+            batch_heads,
+            chunk_size,
+            k_head_dim,
+            v_head_dim,
+            prev_state_bh_stride,
+            query_bh_stride,
+            value_bh_stride,
+            scalar_bh_stride,
+            output_total_rows,
+            output_token_row_offset,
+            output_state_row_offset,
+            &prev_state,
+            &query,
+            &key,
+            &value,
+            &beta,
+            &g,
+            output
+        )
+    );
+
+    let group_width = std::cmp::min(24usize, v_head_dim).max(1);
+    let group_height = std::cmp::min(
+        2usize,
+        std::cmp::max(1, pipeline.max_total_threads_per_threadgroup() / group_width),
+    );
+    let v_tiles = std::cmp::max(1, v_head_dim.div_ceil(group_width));
+    let thread_group_count = MTLSize {
+        width: batch_heads,
+        height: v_tiles,
+        depth: 1,
+    };
+    let thread_group_size = MTLSize {
+        width: group_width,
+        height: group_height,
         depth: 1,
     };
 

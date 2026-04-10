@@ -583,6 +583,13 @@ fn delta_chunk_step_2d_enabled() -> bool {
     }
 }
 
+fn delta_chunk_step_windowed_2d_enabled() -> bool {
+    matches!(
+        std::env::var("CANDLE_QWEN35_DELTA_CHUNK_WINDOWED_2D_KERNEL").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 fn use_delta_chunk_windowed_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
@@ -611,6 +618,25 @@ fn use_delta_chunk_windowed_kernel(
     }
 }
 
+fn use_linear_prefill_packed_kernel(device: &Device, sequence_length: usize) -> bool {
+    if !(matches!(device.location(), DeviceLocation::Metal { .. }) && sequence_length >= 2048) {
+        return false;
+    }
+
+    match std::env::var("CANDLE_QWEN35_LINEAR_PACKED_PREFILL") {
+        Ok(value)
+            if matches!(
+                value.as_str(),
+                "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+            ) =>
+        {
+            false
+        }
+        Ok(_) => true,
+        Err(_) => true,
+    }
+}
+
 fn use_delta_chunk_scan_kernel(
     device: &Device,
     scan_mode: DeltaNetScanMode,
@@ -625,6 +651,132 @@ fn use_delta_chunk_scan_kernel(
             std::env::var("CANDLE_QWEN35_DELTA_CHUNK_SCAN_KERNEL").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
         )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LinearPrefillConvPack {
+    batch_size: usize,
+    conv_dim: usize,
+    total_len: usize,
+    seq_len: usize,
+    kernel_size: usize,
+}
+
+impl candle::CustomOp2 for LinearPrefillConvPack {
+    fn name(&self) -> &'static str {
+        "linear-prefill-conv-pack"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &candle::CpuStorage,
+        _l1: &candle::Layout,
+        _s2: &candle::CpuStorage,
+        _l2: &candle::Layout,
+    ) -> Result<(candle::CpuStorage, candle::Shape)> {
+        candle::bail!("linear-prefill-conv-pack has no cpu implementation")
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(
+        &self,
+        mixed_qkv: &candle::MetalStorage,
+        mixed_qkv_layout: &candle::Layout,
+        weights: &candle::MetalStorage,
+        weights_layout: &candle::Layout,
+    ) -> Result<(candle::MetalStorage, candle::Shape)> {
+        use candle::backend::BackendStorage;
+        use candle::MetalError;
+
+        if !(mixed_qkv_layout.is_contiguous() && weights_layout.is_contiguous()) {
+            candle::bail!("linear-prefill-conv-pack requires contiguous inputs")
+        }
+
+        let (batch_size, conv_dim, total_len) = mixed_qkv_layout.shape().dims3()?;
+        let (weights_conv_dim, kernel_size) = weights_layout.shape().dims2()?;
+        if batch_size != self.batch_size
+            || conv_dim != self.conv_dim
+            || total_len != self.total_len
+            || weights_conv_dim != self.conv_dim
+            || kernel_size != self.kernel_size
+        {
+            candle::bail!(
+                "linear-prefill-conv-pack shape mismatch: mixed_qkv={:?} weights={:?} expected=({}, {}, {}, {})",
+                mixed_qkv_layout.shape().dims(),
+                weights_layout.shape().dims(),
+                self.batch_size,
+                self.conv_dim,
+                self.total_len,
+                self.kernel_size
+            )
+        }
+        if total_len < self.seq_len + self.kernel_size.saturating_sub(1) {
+            candle::bail!(
+                "linear-prefill-conv-pack total_len {} too small for seq_len {} kernel {}",
+                total_len,
+                self.seq_len,
+                self.kernel_size
+            )
+        }
+
+        let device = mixed_qkv.device();
+        let storage_dtype = mixed_qkv.dtype();
+        let dtype = match storage_dtype {
+            DType::F16 => candle_metal_kernels::DType::F16,
+            DType::F32 => candle_metal_kernels::DType::F32,
+            DType::BF16 => candle_metal_kernels::DType::BF16,
+            other => candle::bail!("linear-prefill-conv-pack unsupported dtype {other:?}"),
+        };
+        let output_shape = candle::Shape::from((self.batch_size, self.seq_len, self.conv_dim));
+        let elem_count = output_shape.elem_count();
+        let output = device.new_buffer(elem_count, storage_dtype, "linear-prefill-conv-pack")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_label("linear-prefill-conv-pack");
+        let mixed_qkv = candle_metal_kernels::BufferOffset {
+            buffer: mixed_qkv.buffer(),
+            offset_in_bytes: mixed_qkv_layout.start_offset() * mixed_qkv.dtype().size_in_bytes(),
+        };
+        let weights = candle_metal_kernels::BufferOffset {
+            buffer: weights.buffer(),
+            offset_in_bytes: weights_layout.start_offset() * weights.dtype().size_in_bytes(),
+        };
+        candle_metal_kernels::call_linear_prefill_conv_pack(
+            device.metal_device(),
+            &encoder,
+            device.kernels(),
+            dtype,
+            self.batch_size,
+            self.conv_dim,
+            self.total_len,
+            self.seq_len,
+            self.kernel_size,
+            mixed_qkv,
+            weights,
+            &output,
+        )
+        .map_err(MetalError::from)?;
+        let storage = candle::MetalStorage::new(output, device.clone(), elem_count, storage_dtype);
+        Ok((storage, output_shape))
+    }
+}
+
+fn linear_prefill_conv_pack(
+    mixed_qkv: &Tensor,
+    weights: &Tensor,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<Tensor> {
+    let (batch_size, conv_dim, total_len) = mixed_qkv.dims3()?;
+    mixed_qkv.apply_op2_no_bwd(
+        weights,
+        &LinearPrefillConvPack {
+            batch_size,
+            conv_dim,
+            total_len,
+            seq_len,
+            kernel_size,
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1308,7 +1460,7 @@ impl candle::CustomOp6 for DeltaChunkStepRaw {
                 candle::MetalStorage::new(output, device.clone(), elem_count, prev_state.dtype());
             return Ok((storage, out_shape));
         }
-        let use_2d_kernel = delta_chunk_step_2d_enabled();
+        let use_2d_kernel = delta_chunk_step_2d_enabled() && chunk_size <= 16;
         if use_2d_kernel {
             candle_metal_kernels::call_delta_chunk_step_2d(
                 device.metal_device(),
@@ -1511,46 +1663,79 @@ impl candle::CustomOp6 for DeltaChunkStepWindowedRaw {
             } else {
                 output_state_bh_stride
             };
-            candle_metal_kernels::call_delta_chunk_step_windowed(
-                device.metal_device(),
-                &encoder,
-                device.kernels(),
-                dtype,
-                batch_heads,
-                chunk_size,
-                k_head_dim,
-                v_head_dim,
-                prev_state_bh_stride,
-                query_bh_stride,
-                value_bh_stride,
-                scalar_bh_stride,
-                total_rows,
-                chunk_idx * chunk_size,
-                total_tokens,
-                prev,
-                candle_metal_kernels::BufferOffset {
-                    buffer: query.buffer(),
-                    offset_in_bytes: query_offset,
-                },
-                candle_metal_kernels::BufferOffset {
-                    buffer: key.buffer(),
-                    offset_in_bytes: key_offset,
-                },
-                candle_metal_kernels::BufferOffset {
-                    buffer: value.buffer(),
-                    offset_in_bytes: value_offset,
-                },
-                candle_metal_kernels::BufferOffset {
-                    buffer: beta.buffer(),
-                    offset_in_bytes: scalar_offset,
-                },
-                candle_metal_kernels::BufferOffset {
-                    buffer: g.buffer(),
-                    offset_in_bytes: g_scalar_offset,
-                },
-                &output,
-            )
-            .map_err(MetalError::from)?;
+            let query = candle_metal_kernels::BufferOffset {
+                buffer: query.buffer(),
+                offset_in_bytes: query_offset,
+            };
+            let key = candle_metal_kernels::BufferOffset {
+                buffer: key.buffer(),
+                offset_in_bytes: key_offset,
+            };
+            let value = candle_metal_kernels::BufferOffset {
+                buffer: value.buffer(),
+                offset_in_bytes: value_offset,
+            };
+            let beta = candle_metal_kernels::BufferOffset {
+                buffer: beta.buffer(),
+                offset_in_bytes: scalar_offset,
+            };
+            let g = candle_metal_kernels::BufferOffset {
+                buffer: g.buffer(),
+                offset_in_bytes: g_scalar_offset,
+            };
+            if delta_chunk_step_windowed_2d_enabled() {
+                candle_metal_kernels::call_delta_chunk_step_windowed_2d(
+                    device.metal_device(),
+                    &encoder,
+                    device.kernels(),
+                    dtype,
+                    batch_heads,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim,
+                    prev_state_bh_stride,
+                    query_bh_stride,
+                    value_bh_stride,
+                    scalar_bh_stride,
+                    total_rows,
+                    chunk_idx * chunk_size,
+                    total_tokens,
+                    prev,
+                    query,
+                    key,
+                    value,
+                    beta,
+                    g,
+                    &output,
+                )
+                .map_err(MetalError::from)?;
+            } else {
+                candle_metal_kernels::call_delta_chunk_step_windowed(
+                    device.metal_device(),
+                    &encoder,
+                    device.kernels(),
+                    dtype,
+                    batch_heads,
+                    chunk_size,
+                    k_head_dim,
+                    v_head_dim,
+                    prev_state_bh_stride,
+                    query_bh_stride,
+                    value_bh_stride,
+                    scalar_bh_stride,
+                    total_rows,
+                    chunk_idx * chunk_size,
+                    total_tokens,
+                    prev,
+                    query,
+                    key,
+                    value,
+                    beta,
+                    g,
+                    &output,
+                )
+                .map_err(MetalError::from)?;
+            }
         }
 
         let storage =
@@ -3178,9 +3363,8 @@ impl GatedDeltaNet {
         }
     }
 
-    fn depthwise_conv_from_state(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
+    fn prepare_depthwise_conv_input(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
         let kernel = self.conv_kernel_size;
-        let seq_len = mixed_qkv.dim(2)?;
         let mixed_qkv = match &self.conv_state {
             Some(conv_state) => {
                 let conv_state = if conv_state.dtype() == mixed_qkv.dtype() {
@@ -3203,7 +3387,13 @@ impl GatedDeltaNet {
                     .contiguous()?,
             )
         };
+        Ok(mixed_qkv)
+    }
 
+    fn depthwise_conv_from_state(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
+        let kernel = self.conv_kernel_size;
+        let seq_len = mixed_qkv.dim(2)?;
+        let mixed_qkv = self.prepare_depthwise_conv_input(mixed_qkv)?;
         let weights = self.conv1d.weight().squeeze(1)?;
         let mut output: Option<Tensor> = None;
         for tap in 0..kernel {
@@ -3226,6 +3416,13 @@ impl GatedDeltaNet {
 
     fn run_depthwise_conv_update(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
         self.depthwise_conv_from_state(mixed_qkv)
+    }
+
+    fn run_depthwise_conv_packed_prefill(&mut self, mixed_qkv: &Tensor) -> Result<Tensor> {
+        let seq_len = mixed_qkv.dim(2)?;
+        let mixed_qkv = self.prepare_depthwise_conv_input(mixed_qkv)?.contiguous()?;
+        let weights = self.conv1d.weight().squeeze(1)?.contiguous()?;
+        linear_prefill_conv_pack(&mixed_qkv, &weights, seq_len, self.conv_kernel_size)
     }
 
     fn conv_dim(&self) -> usize {
@@ -3538,13 +3735,19 @@ impl GatedDeltaNet {
                 sequence_length,
                 chunk_size,
             ) {
+                let pack_start = profile_start(device)?;
+                let initial_state = Tensor::zeros(
+                    (batch_heads, k_head_dim, v_head_dim),
+                    compute_dtype,
+                    query.device(),
+                )?;
+                let pack_elapsed = profile_elapsed(pack_start, device)?;
+                profile.linear_full_kernel_pack_millis += pack_elapsed;
+                profile.transfer_millis += pack_elapsed;
+
                 let scan_start = profile_start(device)?;
                 let fused = delta_chunk_step_windowed_raw(
-                    &Tensor::zeros(
-                        (batch_heads, k_head_dim, v_head_dim),
-                        compute_dtype,
-                        query.device(),
-                    )?,
+                    &initial_state,
                     &query_scan,
                     &key_scan,
                     &value_scan,
@@ -3552,7 +3755,8 @@ impl GatedDeltaNet {
                     &g_scan,
                 )?;
                 profile.linear_full_kernel_execute_millis += profile_elapsed(scan_start, device)?;
-                profile.linear_chunk_scan_millis += profile.linear_full_kernel_execute_millis;
+
+                let unpack_start = profile_start(device)?;
                 let output = fused
                     .narrow(1, 0, total_sequence_length)?
                     .reshape((batch_size, num_heads, total_sequence_length, v_head_dim))?
@@ -3564,6 +3768,12 @@ impl GatedDeltaNet {
                     .narrow(1, total_sequence_length, k_head_dim)?
                     .reshape((batch_heads, k_head_dim, v_head_dim))?
                     .contiguous()?;
+                let unpack_elapsed = profile_elapsed(unpack_start, device)?;
+                profile.linear_full_kernel_unpack_millis += unpack_elapsed;
+                profile.transfer_millis += unpack_elapsed;
+                profile.linear_chunk_scan_millis += profile.linear_full_kernel_pack_millis
+                    + profile.linear_full_kernel_execute_millis
+                    + profile.linear_full_kernel_unpack_millis;
                 profile.linear_attention_millis += profile_elapsed(total_start, device)?;
                 return Ok((output, last_recurrent_state, profile));
             }
@@ -3996,11 +4206,12 @@ impl GatedDeltaNet {
 
         let kv_append_start = profile_start(device)?;
         let mixed_qkv = if seq_len == 1 {
-            self.run_depthwise_conv_update(&mixed_qkv)?
+            self.run_depthwise_conv_update(&mixed_qkv)?.transpose(1, 2)?
+        } else if use_linear_prefill_packed_kernel(device, seq_len) {
+            self.run_depthwise_conv_packed_prefill(&mixed_qkv)?
         } else {
-            self.run_depthwise_conv(&mixed_qkv)?
-        }
-        .transpose(1, 2)?;
+            self.run_depthwise_conv(&mixed_qkv)?.transpose(1, 2)?
+        };
         let (dt_bias, a_log_exp) = self.value_cache(device, compute_dtype)?;
         let g = softplus(&a.broadcast_add(&dt_bias)?)?
             .broadcast_mul(&a_log_exp)?
