@@ -78,6 +78,40 @@ int cast_contiguous_device(
 }
 
 template <typename T>
+int affine_contiguous_device(
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    float mul,
+    float add,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(elem_count != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elem_count + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_affine_kernel<T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            elem_count,
+            static_cast<const T*>(src),
+            mul,
+            add,
+            static_cast<T*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
 int sigmoid_contiguous_device(
     size_t device_ordinal,
     size_t elem_count,
@@ -98,6 +132,40 @@ int sigmoid_contiguous_device(
             0,
             elem_count,
             static_cast<const T*>(src),
+            static_cast<T*>(dst)
+        );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename Pred, typename T>
+int where_cond_contiguous_device(
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* pred,
+    const void* on_true,
+    const void* on_false,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(elem_count != 0) {
+        const int block = 256;
+        const int grid = static_cast<int>((elem_count + block - 1) / block);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(candle_hip_where_cond_kernel<Pred, T>),
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            elem_count,
+            static_cast<const Pred*>(pred),
+            static_cast<const T*>(on_true),
+            static_cast<const T*>(on_false),
             static_cast<T*>(dst)
         );
         err = hipGetLastError();
@@ -131,6 +199,70 @@ int softmax_last_dim_device(
             static_cast<const T*>(src),
             static_cast<T*>(dst)
         );
+        err = hipGetLastError();
+        if(err != hipSuccess) return static_cast<int>(err);
+    }
+    err = hipDeviceSynchronize();
+    return static_cast<int>(err);
+}
+
+template <typename T>
+int reduce_contiguous_device(
+    int op,
+    size_t device_ordinal,
+    size_t n_rows,
+    size_t n_cols,
+    const void* src,
+    void* dst
+) {
+    ScopedHipDevice scoped_device(device_ordinal);
+    hipError_t err = scoped_device.status();
+    if(err != hipSuccess) return static_cast<int>(err);
+    if(n_rows != 0 && n_cols != 0) {
+        constexpr int block = 256;
+        switch(op) {
+            case 0:
+                hipLaunchKernelGGL(
+                    HIP_KERNEL_NAME(candle_hip_reduce_sum_kernel<T, block>),
+                    dim3(static_cast<unsigned int>(n_rows)),
+                    dim3(block),
+                    0,
+                    0,
+                    n_rows,
+                    n_cols,
+                    static_cast<const T*>(src),
+                    static_cast<T*>(dst)
+                );
+                break;
+            case 1:
+                hipLaunchKernelGGL(
+                    HIP_KERNEL_NAME(candle_hip_reduce_min_kernel<T, block>),
+                    dim3(static_cast<unsigned int>(n_rows)),
+                    dim3(block),
+                    0,
+                    0,
+                    n_rows,
+                    n_cols,
+                    static_cast<const T*>(src),
+                    static_cast<T*>(dst)
+                );
+                break;
+            case 2:
+                hipLaunchKernelGGL(
+                    HIP_KERNEL_NAME(candle_hip_reduce_max_kernel<T, block>),
+                    dim3(static_cast<unsigned int>(n_rows)),
+                    dim3(block),
+                    0,
+                    0,
+                    n_rows,
+                    n_cols,
+                    static_cast<const T*>(src),
+                    static_cast<T*>(dst)
+                );
+                break;
+            default:
+                return static_cast<int>(hipErrorInvalidValue);
+        }
         err = hipGetLastError();
         if(err != hipSuccess) return static_cast<int>(err);
     }
@@ -1880,6 +2012,25 @@ extern "C" int candle_hip_cast_contiguous(
     }
 }
 
+extern "C" int candle_hip_affine_contiguous(
+    int dtype,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* src,
+    float mul,
+    float add,
+    void* dst
+) {
+    switch(dtype) {
+        case 0: return affine_contiguous_device<half>(device_ordinal, elem_count, src, mul, add, dst);
+        case 1: return affine_contiguous_device<float>(device_ordinal, elem_count, src, mul, add, dst);
+        case 2:
+            return affine_contiguous_device<hip_bfloat16>(device_ordinal, elem_count, src, mul, add, dst);
+        case 3: return affine_contiguous_device<uint8_t>(device_ordinal, elem_count, src, mul, add, dst);
+        default: return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
 extern "C" int candle_hip_sigmoid_contiguous(
     int dtype,
     size_t device_ordinal,
@@ -1892,6 +2043,89 @@ extern "C" int candle_hip_sigmoid_contiguous(
         case 1: return sigmoid_contiguous_device<float>(device_ordinal, elem_count, src, dst);
         case 2: return sigmoid_contiguous_device<hip_bfloat16>(device_ordinal, elem_count, src, dst);
         default: return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_where_cond_contiguous(
+    int pred_dtype,
+    int value_dtype,
+    size_t device_ordinal,
+    size_t elem_count,
+    const void* pred,
+    const void* on_true,
+    const void* on_false,
+    void* dst
+) {
+    switch(pred_dtype) {
+        case 0:
+            switch(value_dtype) {
+                case 0:
+                    return where_cond_contiguous_device<uint8_t, half>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 1:
+                    return where_cond_contiguous_device<uint8_t, float>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 2:
+                    return where_cond_contiguous_device<uint8_t, hip_bfloat16>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 3:
+                    return where_cond_contiguous_device<uint8_t, uint8_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 4:
+                    return where_cond_contiguous_device<uint8_t, uint32_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 5:
+                    return where_cond_contiguous_device<uint8_t, int64_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                default:
+                    return static_cast<int>(hipErrorInvalidValue);
+            }
+        case 1:
+            switch(value_dtype) {
+                case 0:
+                    return where_cond_contiguous_device<uint32_t, half>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 1:
+                    return where_cond_contiguous_device<uint32_t, float>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 2:
+                    return where_cond_contiguous_device<uint32_t, hip_bfloat16>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 3:
+                    return where_cond_contiguous_device<uint32_t, uint8_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 4:
+                    return where_cond_contiguous_device<uint32_t, uint32_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                case 5:
+                    return where_cond_contiguous_device<uint32_t, int64_t>(
+                        device_ordinal, elem_count, pred, on_true, on_false, dst);
+                default:
+                    return static_cast<int>(hipErrorInvalidValue);
+            }
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int candle_hip_reduce_contiguous(
+    int op,
+    int dtype,
+    size_t device_ordinal,
+    size_t n_rows,
+    size_t n_cols,
+    const void* src,
+    void* dst
+) {
+    switch(dtype) {
+        case 0:
+            return reduce_contiguous_device<half>(op, device_ordinal, n_rows, n_cols, src, dst);
+        case 1:
+            return reduce_contiguous_device<float>(op, device_ordinal, n_rows, n_cols, src, dst);
+        case 2:
+            return reduce_contiguous_device<hip_bfloat16>(op, device_ordinal, n_rows, n_cols, src, dst);
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
     }
 }
 

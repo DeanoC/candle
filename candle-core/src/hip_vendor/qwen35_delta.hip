@@ -94,11 +94,120 @@ __global__ void candle_hip_cast_kernel(size_t elem_count, const Src *src, Dst *d
 }
 
 template <typename T>
+__global__ void candle_hip_affine_kernel(
+    size_t elem_count,
+    const T *src,
+    float mul,
+    float add,
+    T *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        const float value = qwen35_to_float(src[tid]);
+        dst[tid] = qwen35_from_float<T>(value * mul + add);
+    }
+}
+
+template <typename T>
 __global__ void candle_hip_sigmoid_kernel(size_t elem_count, const T *src, T *dst) {
     const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (tid < elem_count) {
         const float x = qwen35_to_float(src[tid]);
         dst[tid] = qwen35_from_float<T>(1.0f / (1.0f + expf(-x)));
+    }
+}
+
+template <typename Pred, typename T>
+__global__ void candle_hip_where_cond_kernel(
+    size_t elem_count,
+    const Pred *pred,
+    const T *on_true,
+    const T *on_false,
+    T *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        dst[tid] = pred[tid] != static_cast<Pred>(0) ? on_true[tid] : on_false[tid];
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_sum_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = 0.0f;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local += qwen35_to_float(src_row[col]);
+    }
+    const float reduced = candle_hip_block_reduce_sum<BLOCK_SIZE>(local);
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(reduced);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_max_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = -INFINITY;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local = fmaxf(local, qwen35_to_float(src_row[col]));
+    }
+    const float reduced = candle_hip_block_reduce_max<BLOCK_SIZE>(local);
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(reduced);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_min_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = INFINITY;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local = fminf(local, qwen35_to_float(src_row[col]));
+    }
+    __shared__ float shared[BLOCK_SIZE];
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] = fminf(shared[threadIdx.x], shared[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(shared[0]);
     }
 }
 

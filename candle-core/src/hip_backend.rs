@@ -357,7 +357,29 @@ impl BackendStorage for HipStorage {
     }
 
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
-        self.cpu_fallback_map(|cpu| cpu.affine(layout, mul, add))
+        let Some((start, _end)) = layout.contiguous_offsets() else {
+            return self.cpu_fallback_map(|cpu| cpu.affine(layout, mul, add));
+        };
+        let dtype = match hip_dtype_code(self.dtype) {
+            Ok(code) => code,
+            Err(_) => return self.cpu_fallback_map(|cpu| cpu.affine(layout, mul, add)),
+        };
+        let output = Self::alloc_uninit(&self.device, layout.shape().elem_count(), self.dtype)?;
+        let status = unsafe {
+            ffi::candle_hip_affine_contiguous(
+                dtype,
+                self.device.ordinal,
+                layout.shape().elem_count(),
+                self.raw_device_ptr_with_offset(start)?,
+                mul as f32,
+                add as f32,
+                output.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(qwen35_error("hip-affine", status));
+        }
+        Ok(output)
     }
 
     fn powf(&self, layout: &Layout, alpha: f64) -> Result<Self> {
@@ -369,7 +391,60 @@ impl BackendStorage for HipStorage {
     }
 
     fn reduce_op(&self, op: ReduceOp, layout: &Layout, dims: &[usize]) -> Result<Self> {
-        self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims))
+        if dims.is_empty() || !layout.is_contiguous() {
+            return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims));
+        }
+        let src_dims = layout.shape().dims();
+        let reduce_start = src_dims
+            .len()
+            .checked_sub(dims.len())
+            .ok_or_else(|| Error::Msg("invalid HIP reduce dims".into()).bt())?;
+        if !dims
+            .iter()
+            .enumerate()
+            .all(|(idx, dim)| *dim == reduce_start + idx)
+        {
+            return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims));
+        }
+        if layout.shape().elem_count() == 0 && matches!(op, ReduceOp::Min | ReduceOp::Max) {
+            return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims));
+        }
+        let dtype = match hip_dtype_code(self.dtype) {
+            Ok(code) => code,
+            Err(_) => return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims)),
+        };
+        let op_code = match op {
+            ReduceOp::Sum => 0,
+            ReduceOp::Min => 1,
+            ReduceOp::Max => 2,
+            _ => return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims)),
+        };
+        let n_rows = src_dims[..reduce_start]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+        let n_cols = src_dims[reduce_start..]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1);
+        let output = Self::alloc_uninit(&self.device, n_rows, self.dtype)?;
+        let status = unsafe {
+            ffi::candle_hip_reduce_contiguous(
+                op_code,
+                dtype,
+                self.device.ordinal,
+                n_rows,
+                n_cols,
+                self.raw_device_ptr_with_offset(layout.start_offset())?,
+                output.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(qwen35_error("hip-reduce", status));
+        }
+        Ok(output)
     }
 
     fn cmp(&self, op: CmpOp, rhs: &Self, lhs_layout: &Layout, rhs_layout: &Layout) -> Result<Self> {
@@ -429,13 +504,88 @@ impl BackendStorage for HipStorage {
         false_tensor: &Self,
         false_layout: &Layout,
     ) -> Result<Self> {
-        let cond = self.to_cpu_storage()?;
-        let t = true_tensor.to_cpu_storage()?;
-        let f = false_tensor.to_cpu_storage()?;
-        Self::from_cpu_storage(
-            cond.where_cond(layout, &t, true_layout, &f, false_layout)?,
-            &self.device,
+        if true_tensor.dtype != false_tensor.dtype {
+            return self.cpu_fallback_map2(true_tensor, |_cond, _true_tensor| {
+                let cond = self.to_cpu_storage()?;
+                let t = true_tensor.to_cpu_storage()?;
+                let f = false_tensor.to_cpu_storage()?;
+                cond.where_cond(layout, &t, true_layout, &f, false_layout)
+            });
+        }
+        let (
+            Some((cond_start, _)),
+            Some((true_start, _)),
+            Some((false_start, _)),
+        ) = (
+            layout.contiguous_offsets(),
+            true_layout.contiguous_offsets(),
+            false_layout.contiguous_offsets(),
         )
+        else {
+            let cond = self.to_cpu_storage()?;
+            let t = true_tensor.to_cpu_storage()?;
+            let f = false_tensor.to_cpu_storage()?;
+            return Self::from_cpu_storage(
+                cond.where_cond(layout, &t, true_layout, &f, false_layout)?,
+                &self.device,
+            );
+        };
+        if layout.shape() != true_layout.shape() || layout.shape() != false_layout.shape() {
+            let cond = self.to_cpu_storage()?;
+            let t = true_tensor.to_cpu_storage()?;
+            let f = false_tensor.to_cpu_storage()?;
+            return Self::from_cpu_storage(
+                cond.where_cond(layout, &t, true_layout, &f, false_layout)?,
+                &self.device,
+            );
+        }
+        let pred_dtype = match self.dtype {
+            DType::U8 => 0,
+            DType::U32 => 1,
+            _ => {
+                let cond = self.to_cpu_storage()?;
+                let t = true_tensor.to_cpu_storage()?;
+                let f = false_tensor.to_cpu_storage()?;
+                return Self::from_cpu_storage(
+                    cond.where_cond(layout, &t, true_layout, &f, false_layout)?,
+                    &self.device,
+                );
+            }
+        };
+        let value_dtype = match true_tensor.dtype {
+            DType::F16 => 0,
+            DType::F32 => 1,
+            DType::BF16 => 2,
+            DType::U8 => 3,
+            DType::U32 => 4,
+            DType::I64 => 5,
+            _ => {
+                let cond = self.to_cpu_storage()?;
+                let t = true_tensor.to_cpu_storage()?;
+                let f = false_tensor.to_cpu_storage()?;
+                return Self::from_cpu_storage(
+                    cond.where_cond(layout, &t, true_layout, &f, false_layout)?,
+                    &self.device,
+                );
+            }
+        };
+        let output = Self::alloc_uninit(&self.device, true_layout.shape().elem_count(), true_tensor.dtype)?;
+        let status = unsafe {
+            ffi::candle_hip_where_cond_contiguous(
+                pred_dtype,
+                value_dtype,
+                self.device.ordinal,
+                true_layout.shape().elem_count(),
+                self.raw_device_ptr_with_offset(cond_start)?,
+                true_tensor.raw_device_ptr_with_offset(true_start)?,
+                false_tensor.raw_device_ptr_with_offset(false_start)?,
+                output.raw_device_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(qwen35_error("hip-where-cond", status));
+        }
+        Ok(output)
     }
 
     fn conv1d(
@@ -1272,10 +1422,41 @@ pub mod ffi {
             dst: *mut c_void,
         ) -> c_int;
 
+        pub fn candle_hip_affine_contiguous(
+            dtype: c_int,
+            device_ordinal: usize,
+            elem_count: usize,
+            src: *const c_void,
+            mul: f32,
+            add: f32,
+            dst: *mut c_void,
+        ) -> c_int;
+
         pub fn candle_hip_sigmoid_contiguous(
             dtype: c_int,
             device_ordinal: usize,
             elem_count: usize,
+            src: *const c_void,
+            dst: *mut c_void,
+        ) -> c_int;
+
+        pub fn candle_hip_where_cond_contiguous(
+            pred_dtype: c_int,
+            value_dtype: c_int,
+            device_ordinal: usize,
+            elem_count: usize,
+            pred: *const c_void,
+            on_true: *const c_void,
+            on_false: *const c_void,
+            dst: *mut c_void,
+        ) -> c_int;
+
+        pub fn candle_hip_reduce_contiguous(
+            op: c_int,
+            dtype: c_int,
+            device_ordinal: usize,
+            n_rows: usize,
+            n_cols: usize,
             src: *const c_void,
             dst: *mut c_void,
         ) -> c_int;
