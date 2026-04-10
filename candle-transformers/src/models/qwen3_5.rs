@@ -5367,6 +5367,18 @@ impl GatedDeltaNet {
         let k_cumdecay_scan =
             k_cumdecay.reshape((batch_heads, num_chunks, chunk_size, k_head_dim))?;
         let q_state_scan = query_scan.broadcast_mul(&exp_g_scan.unsqueeze(D::Minus1)?)?;
+        let cuda_flat3d_scan = matches!(device.location(), DeviceLocation::Cuda { .. })
+            && matches!(scan_mode, DeltaNetScanMode::Flat3d);
+        let q_state_scan = if cuda_flat3d_scan {
+            q_state_scan.contiguous()?
+        } else {
+            q_state_scan
+        };
+        let k_cumdecay_scan = if cuda_flat3d_scan {
+            k_cumdecay_scan.contiguous()?
+        } else {
+            k_cumdecay_scan
+        };
         let (state_decay_scan, chunk_decay_scan) = match scan_mode {
             DeltaNetScanMode::Flat3d
             | DeltaNetScanMode::HoistedDecays
@@ -5395,6 +5407,21 @@ impl GatedDeltaNet {
                 },
             ),
             _ => None,
+        };
+        let key_scan_t = if cuda_flat3d_scan {
+            Some(key_scan.transpose(3, 2)?.contiguous()?)
+        } else {
+            None
+        };
+        let weighted_key_scan = if cuda_flat3d_scan {
+            chunk_decay_scan
+                .as_ref()
+                .map(|chunk_decay| key_scan.broadcast_mul(chunk_decay))
+                .transpose()?
+                .map(|tensor| tensor.contiguous())
+                .transpose()?
+        } else {
+            None
         };
         let lower_2d = lower_2d.reshape((1, chunk_size, chunk_size))?;
         let mut last_recurrent_state = Tensor::zeros(
@@ -5522,7 +5549,12 @@ impl GatedDeltaNet {
                 local_attn_scan.i((.., chunk_idx, .., ..))?
             } else {
                 let decay_i = decay_scan.i((.., chunk_idx, .., ..))?;
-                q_i.matmul(&k_i.transpose(2, 1)?)?
+                let k_i_t = if let Some(key_scan_t) = &key_scan_t {
+                    key_scan_t.i((.., chunk_idx, .., ..))?
+                } else {
+                    k_i.transpose(2, 1)?.contiguous()?
+                };
+                q_i.matmul(&k_i_t)?
                     .broadcast_mul(&decay_i)?
                     .broadcast_mul(&lower_2d)?
             };
@@ -5532,13 +5564,19 @@ impl GatedDeltaNet {
             let (v_new, attn_inter, fused_next_state) = if use_chunk_fused_kernel
                 && state_scan.is_none()
             {
-                let weighted_key = chunk_decay_scan
-                    .as_ref()
-                    .ok_or_else(|| {
-                        candle::Error::Msg("delta-chunk-fused requires hoisted chunk decay".into())
-                    })?
-                    .i((.., chunk_idx, .., ..))?
-                    .broadcast_mul(&k_i)?;
+                let weighted_key = if let Some(weighted_key_scan) = &weighted_key_scan {
+                    weighted_key_scan.i((.., chunk_idx, .., ..))?
+                } else {
+                    chunk_decay_scan
+                        .as_ref()
+                        .ok_or_else(|| {
+                            candle::Error::Msg(
+                                "delta-chunk-fused requires hoisted chunk decay".into(),
+                            )
+                        })?
+                        .i((.., chunk_idx, .., ..))?
+                        .broadcast_mul(&k_i)?
+                };
                 let q_state = q_state_scan.i((.., chunk_idx, .., ..))?;
                 let state_decay = state_decay_scan
                     .as_ref()
@@ -5616,7 +5654,11 @@ impl GatedDeltaNet {
                 let prev_state_scaled = last_recurrent_state
                     .broadcast_mul(&state_decay)?
                     .contiguous()?;
-                let weighted_key = k_i.broadcast_mul(&chunk_decay)?.contiguous()?;
+                let weighted_key = if let Some(weighted_key_scan) = &weighted_key_scan {
+                    weighted_key_scan.i((.., chunk_idx, .., ..))?.contiguous()?
+                } else {
+                    k_i.broadcast_mul(&chunk_decay)?.contiguous()?
+                };
                 last_recurrent_state = delta_state_update(
                     &prev_state_scaled,
                     &weighted_key,
