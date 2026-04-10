@@ -173,6 +173,240 @@ cleanup:
     return static_cast<int>(err);
 }
 
+template <typename T, typename Kernel>
+int delta_recurrent_prefill_host(
+    size_t batch_heads,
+    size_t seq_len,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const void* initial_state_host,
+    const void* query_host,
+    const void* key_host,
+    const void* value_host,
+    const void* beta_host,
+    const void* g_host,
+    void* out_host,
+    Kernel kernel
+) {
+    const size_t state_elems = batch_heads * k_head_dim * v_head_dim;
+    const size_t qk_elems = batch_heads * seq_len * k_head_dim;
+    const size_t value_elems = batch_heads * seq_len * v_head_dim;
+    const size_t scalar_elems = batch_heads * seq_len;
+    const size_t out_elems = batch_heads * (seq_len + k_head_dim) * v_head_dim;
+    const size_t state_bytes = state_elems * sizeof(T);
+    const size_t qk_bytes = qk_elems * sizeof(T);
+    const size_t value_bytes = value_elems * sizeof(T);
+    const size_t scalar_bytes = scalar_elems * sizeof(T);
+    const size_t out_bytes = out_elems * sizeof(T);
+    const size_t total_threads = batch_heads * v_head_dim;
+
+    T* d_initial_state = nullptr;
+    T* d_query = nullptr;
+    T* d_key = nullptr;
+    T* d_value = nullptr;
+    T* d_beta = nullptr;
+    T* d_g = nullptr;
+    T* d_out = nullptr;
+    hipError_t err = hipSuccess;
+
+    err = hipMalloc(reinterpret_cast<void**>(&d_initial_state), state_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_query), qk_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_key), qk_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_value), value_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_beta), scalar_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_g), scalar_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_out), out_bytes);
+    if(err != hipSuccess) goto cleanup;
+
+    err = hipMemcpy(d_initial_state, initial_state_host, state_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_query, query_host, qk_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_key, key_host, qk_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_value, value_host, value_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_beta, beta_host, scalar_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_g, g_host, scalar_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+
+    {
+        const int block = 256;
+        const int grid = static_cast<int>((total_threads + block - 1) / block);
+        hipLaunchKernelGGL(
+            kernel,
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            batch_heads,
+            seq_len,
+            k_head_dim,
+            v_head_dim,
+            d_initial_state,
+            d_query,
+            d_key,
+            d_value,
+            d_beta,
+            d_g,
+            d_out
+        );
+    }
+    err = hipGetLastError();
+    if(err != hipSuccess) goto cleanup;
+    err = hipDeviceSynchronize();
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(out_host, d_out, out_bytes, hipMemcpyDeviceToHost);
+
+cleanup:
+    if(d_out != nullptr) {
+        hipFree(d_out);
+    }
+    if(d_g != nullptr) {
+        hipFree(d_g);
+    }
+    if(d_beta != nullptr) {
+        hipFree(d_beta);
+    }
+    if(d_value != nullptr) {
+        hipFree(d_value);
+    }
+    if(d_key != nullptr) {
+        hipFree(d_key);
+    }
+    if(d_query != nullptr) {
+        hipFree(d_query);
+    }
+    if(d_initial_state != nullptr) {
+        hipFree(d_initial_state);
+    }
+    return static_cast<int>(err);
+}
+
+template <typename T, typename Kernel>
+int delta_chunk_step_host(
+    size_t batch_heads,
+    size_t chunk_size,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const void* prev_state_host,
+    const void* query_host,
+    const void* key_host,
+    const void* value_host,
+    const void* beta_host,
+    const void* g_host,
+    void* out_host,
+    Kernel kernel
+) {
+    const size_t state_elems = batch_heads * k_head_dim * v_head_dim;
+    const size_t qk_elems = batch_heads * chunk_size * k_head_dim;
+    const size_t value_elems = batch_heads * chunk_size * v_head_dim;
+    const size_t scalar_elems = batch_heads * chunk_size;
+    const size_t out_elems = batch_heads * (chunk_size + k_head_dim) * v_head_dim;
+    const size_t state_bytes = state_elems * sizeof(T);
+    const size_t qk_bytes = qk_elems * sizeof(T);
+    const size_t value_bytes = value_elems * sizeof(T);
+    const size_t scalar_bytes = scalar_elems * sizeof(T);
+    const size_t out_bytes = out_elems * sizeof(T);
+    const size_t total_threads = batch_heads * v_head_dim;
+
+    T* d_prev_state = nullptr;
+    T* d_query = nullptr;
+    T* d_key = nullptr;
+    T* d_value = nullptr;
+    T* d_beta = nullptr;
+    T* d_g = nullptr;
+    T* d_out = nullptr;
+    hipError_t err = hipSuccess;
+
+    err = hipMalloc(reinterpret_cast<void**>(&d_prev_state), state_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_query), qk_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_key), qk_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_value), value_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_beta), scalar_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_g), scalar_bytes);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMalloc(reinterpret_cast<void**>(&d_out), out_bytes);
+    if(err != hipSuccess) goto cleanup;
+
+    err = hipMemcpy(d_prev_state, prev_state_host, state_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_query, query_host, qk_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_key, key_host, qk_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_value, value_host, value_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_beta, beta_host, scalar_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(d_g, g_host, scalar_bytes, hipMemcpyHostToDevice);
+    if(err != hipSuccess) goto cleanup;
+
+    {
+        const int block = 256;
+        const int grid = static_cast<int>((total_threads + block - 1) / block);
+        hipLaunchKernelGGL(
+            kernel,
+            dim3(grid),
+            dim3(block),
+            0,
+            0,
+            batch_heads,
+            chunk_size,
+            k_head_dim,
+            v_head_dim,
+            d_prev_state,
+            d_query,
+            d_key,
+            d_value,
+            d_beta,
+            d_g,
+            d_out
+        );
+    }
+    err = hipGetLastError();
+    if(err != hipSuccess) goto cleanup;
+    err = hipDeviceSynchronize();
+    if(err != hipSuccess) goto cleanup;
+    err = hipMemcpy(out_host, d_out, out_bytes, hipMemcpyDeviceToHost);
+
+cleanup:
+    if(d_out != nullptr) {
+        hipFree(d_out);
+    }
+    if(d_g != nullptr) {
+        hipFree(d_g);
+    }
+    if(d_beta != nullptr) {
+        hipFree(d_beta);
+    }
+    if(d_value != nullptr) {
+        hipFree(d_value);
+    }
+    if(d_key != nullptr) {
+        hipFree(d_key);
+    }
+    if(d_query != nullptr) {
+        hipFree(d_query);
+    }
+    if(d_prev_state != nullptr) {
+        hipFree(d_prev_state);
+    }
+    return static_cast<int>(err);
+}
+
 }  // namespace
 
 extern "C" int qwen35_hip_linear_prefill_conv_pack(
@@ -295,6 +529,136 @@ extern "C" int qwen35_hip_full_attention_prefill(
                 value,
                 out,
                 full_attention_prefill_bf16
+            );
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int qwen35_hip_delta_recurrent_prefill(
+    int dtype,
+    size_t batch_heads,
+    size_t seq_len,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const void* initial_state,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* beta,
+    const void* g,
+    void* out
+) {
+    switch(dtype) {
+        case 0:
+            return delta_recurrent_prefill_host<half>(
+                batch_heads,
+                seq_len,
+                k_head_dim,
+                v_head_dim,
+                initial_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_recurrent_prefill_f16
+            );
+        case 1:
+            return delta_recurrent_prefill_host<float>(
+                batch_heads,
+                seq_len,
+                k_head_dim,
+                v_head_dim,
+                initial_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_recurrent_prefill_f32
+            );
+        case 2:
+            return delta_recurrent_prefill_host<hip_bfloat16>(
+                batch_heads,
+                seq_len,
+                k_head_dim,
+                v_head_dim,
+                initial_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_recurrent_prefill_bf16
+            );
+        default:
+            return static_cast<int>(hipErrorInvalidValue);
+    }
+}
+
+extern "C" int qwen35_hip_delta_chunk_step(
+    int dtype,
+    size_t batch_heads,
+    size_t chunk_size,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const void* prev_state,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* beta,
+    const void* g,
+    void* out
+) {
+    switch(dtype) {
+        case 0:
+            return delta_chunk_step_host<half>(
+                batch_heads,
+                chunk_size,
+                k_head_dim,
+                v_head_dim,
+                prev_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_chunk_step_f16
+            );
+        case 1:
+            return delta_chunk_step_host<float>(
+                batch_heads,
+                chunk_size,
+                k_head_dim,
+                v_head_dim,
+                prev_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_chunk_step_f32
+            );
+        case 2:
+            return delta_chunk_step_host<hip_bfloat16>(
+                batch_heads,
+                chunk_size,
+                k_head_dim,
+                v_head_dim,
+                prev_state,
+                query,
+                key,
+                value,
+                beta,
+                g,
+                out,
+                delta_chunk_step_bf16
             );
         default:
             return static_cast<int>(hipErrorInvalidValue);

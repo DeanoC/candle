@@ -176,6 +176,143 @@ __device__ inline void full_attention_prefill_impl(
     }
 }
 
+template <typename T, int MAX_K = 256>
+__device__ inline void delta_recurrent_prefill_impl(
+    size_t batch_heads,
+    size_t seq_len,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const T *initial_state,
+    const T *query,
+    const T *key,
+    const T *value,
+    const T *beta,
+    const T *g,
+    T *out,
+    size_t tid
+) {
+    const size_t total_threads = batch_heads * v_head_dim;
+    if (tid >= total_threads || k_head_dim > static_cast<size_t>(MAX_K)) {
+        return;
+    }
+
+    const size_t bh = tid / v_head_dim;
+    const size_t v_idx = tid - bh * v_head_dim;
+    const size_t state_stride = k_head_dim * v_head_dim;
+    const size_t token_stride_k = seq_len * k_head_dim;
+    const size_t token_stride_v = seq_len * v_head_dim;
+    const size_t token_stride_s = seq_len;
+    const size_t out_base = bh * (seq_len + k_head_dim) * v_head_dim;
+
+    float state[MAX_K];
+    for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+        state[k_idx] =
+            qwen35_to_float(initial_state[bh * state_stride + k_idx * v_head_dim + v_idx]);
+    }
+
+    for (size_t t = 0; t < seq_len; ++t) {
+        const float g_t = expf(qwen35_to_float(g[bh * token_stride_s + t]));
+        const size_t key_row = bh * token_stride_k + t * k_head_dim;
+        const size_t value_row = bh * token_stride_v + t * v_head_dim;
+        const size_t beta_row = bh * token_stride_s + t;
+
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            state[k_idx] *= g_t;
+        }
+
+        float kv_mem = 0.0f;
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            kv_mem += state[k_idx] * qwen35_to_float(key[key_row + k_idx]);
+        }
+
+        const float delta =
+            (qwen35_to_float(value[value_row + v_idx]) - kv_mem) * qwen35_to_float(beta[beta_row]);
+
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            state[k_idx] += qwen35_to_float(key[key_row + k_idx]) * delta;
+        }
+
+        float out_t = 0.0f;
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            out_t += state[k_idx] * qwen35_to_float(query[key_row + k_idx]);
+        }
+        out[out_base + t * v_head_dim + v_idx] = qwen35_from_float<T>(out_t);
+    }
+
+    const size_t state_out = out_base + seq_len * v_head_dim;
+    for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+        out[state_out + k_idx * v_head_dim + v_idx] = qwen35_from_float<T>(state[k_idx]);
+    }
+}
+
+template <typename T, int MAX_K = 256>
+__device__ inline void delta_chunk_step_impl(
+    size_t batch_heads,
+    size_t chunk_size,
+    size_t k_head_dim,
+    size_t v_head_dim,
+    const T *prev_state,
+    const T *query,
+    const T *key,
+    const T *value,
+    const T *beta,
+    const T *g,
+    T *out,
+    size_t tid
+) {
+    const size_t total_threads = batch_heads * v_head_dim;
+    if (tid >= total_threads || k_head_dim > static_cast<size_t>(MAX_K)) {
+        return;
+    }
+
+    const size_t bh = tid / v_head_dim;
+    const size_t v_idx = tid - bh * v_head_dim;
+    const size_t state_stride = k_head_dim * v_head_dim;
+    const size_t token_stride_k = chunk_size * k_head_dim;
+    const size_t token_stride_v = chunk_size * v_head_dim;
+    const size_t token_stride_s = chunk_size;
+    const size_t out_base = bh * (chunk_size + k_head_dim) * v_head_dim;
+
+    float state[MAX_K];
+    for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+        state[k_idx] = qwen35_to_float(prev_state[bh * state_stride + k_idx * v_head_dim + v_idx]);
+    }
+
+    for (size_t t = 0; t < chunk_size; ++t) {
+        const float g_t = expf(qwen35_to_float(g[bh * token_stride_s + t]));
+        const size_t key_row = bh * token_stride_k + t * k_head_dim;
+        const size_t value_row = bh * token_stride_v + t * v_head_dim;
+        const size_t beta_row = bh * token_stride_s + t;
+
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            state[k_idx] *= g_t;
+        }
+
+        float kv_mem = 0.0f;
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            kv_mem += state[k_idx] * qwen35_to_float(key[key_row + k_idx]);
+        }
+
+        const float delta =
+            (qwen35_to_float(value[value_row + v_idx]) - kv_mem) * qwen35_to_float(beta[beta_row]);
+
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            state[k_idx] += qwen35_to_float(key[key_row + k_idx]) * delta;
+        }
+
+        float out_t = 0.0f;
+        for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+            out_t += state[k_idx] * qwen35_to_float(query[key_row + k_idx]);
+        }
+        out[out_base + t * v_head_dim + v_idx] = qwen35_from_float<T>(out_t);
+    }
+
+    const size_t state_out = out_base + chunk_size * v_head_dim;
+    for (size_t k_idx = 0; k_idx < k_head_dim; ++k_idx) {
+        out[state_out + k_idx * v_head_dim + v_idx] = qwen35_from_float<T>(state[k_idx]);
+    }
+}
+
 #define DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -214,17 +351,45 @@ extern "C" __global__ void name( \
         seqlen_offset, query, key, value, out, tid); \
 }
 
-#define DEFINE_PLACEHOLDER_DELTA_RECURRENT_PREFILL_KERNEL(name, type) \
+#define DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
-    size_t, size_t, size_t, size_t, const type *, const type *, const type *, const type *, \
-    const type *, const type *, type * \
-) {}
+    size_t batch_heads, \
+    size_t seq_len, \
+    size_t k_head_dim, \
+    size_t v_head_dim, \
+    const type *initial_state, \
+    const type *query, \
+    const type *key, \
+    const type *value, \
+    const type *beta, \
+    const type *g, \
+    type *out \
+) { \
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; \
+    delta_recurrent_prefill_impl<type>( \
+        batch_heads, seq_len, k_head_dim, v_head_dim, initial_state, query, key, value, beta, \
+        g, out, tid); \
+}
 
-#define DEFINE_PLACEHOLDER_DELTA_CHUNK_STEP_KERNEL(name, type) \
+#define DEFINE_DELTA_CHUNK_STEP_KERNEL(name, type) \
 extern "C" __global__ void name( \
-    size_t, size_t, size_t, size_t, const type *, const type *, const type *, const type *, \
-    const type *, const type *, type * \
-) {}
+    size_t batch_heads, \
+    size_t chunk_size, \
+    size_t k_head_dim, \
+    size_t v_head_dim, \
+    const type *prev_state, \
+    const type *query, \
+    const type *key, \
+    const type *value, \
+    const type *beta, \
+    const type *g, \
+    type *out \
+) { \
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; \
+    delta_chunk_step_impl<type>( \
+        batch_heads, chunk_size, k_head_dim, v_head_dim, prev_state, query, key, value, beta, \
+        g, out, tid); \
+}
 
 #define DEFINE_PLACEHOLDER_DELTA_CHUNK_WINDOWED_KERNEL(name, type) \
 extern "C" __global__ void name( \
@@ -259,13 +424,13 @@ DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_bf16, hip_bfloat16)
 
-DEFINE_PLACEHOLDER_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f16, half)
-DEFINE_PLACEHOLDER_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f32, float)
-DEFINE_PLACEHOLDER_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_bf16, hip_bfloat16)
+DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f16, half)
+DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_f32, float)
+DEFINE_DELTA_RECURRENT_PREFILL_KERNEL(delta_recurrent_prefill_bf16, hip_bfloat16)
 
-DEFINE_PLACEHOLDER_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f16, half)
-DEFINE_PLACEHOLDER_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f32, float)
-DEFINE_PLACEHOLDER_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_bf16, hip_bfloat16)
+DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f16, half)
+DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f32, float)
+DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_bf16, hip_bfloat16)
 
 DEFINE_PLACEHOLDER_DELTA_CHUNK_WINDOWED_KERNEL(delta_chunk_step_windowed_f16, half)
 DEFINE_PLACEHOLDER_DELTA_CHUNK_WINDOWED_KERNEL(delta_chunk_step_windowed_f32, float)
