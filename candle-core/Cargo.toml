@@ -57,6 +57,7 @@ metal = [
     "dep:candle-metal-kernels",
     "candle-ug?/metal",
 ]
+hip = []
 ug = ["dep:candle-ug"]
 
 [[bench]]

@@ -8,6 +8,7 @@ use crate::{CpuStorage, DType, Result, Shape, Storage, WithDType};
 pub enum DeviceLocation {
     Cpu,
     Cuda { gpu_id: usize },
+    Hip { gpu_id: usize },
     Metal { gpu_id: usize },
 }
 
@@ -16,6 +17,7 @@ pub enum DeviceLocation {
 pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
+    Hip(crate::HipDevice),
     Metal(crate::MetalDevice),
 }
 
@@ -235,11 +237,25 @@ impl Device {
         Ok(Self::Cuda(crate::CudaDevice::new(ordinal)?))
     }
 
+    pub fn new_hip(ordinal: usize) -> Result<Self> {
+        Ok(Self::Hip(crate::HipDevice::new(ordinal)?))
+    }
+
     pub fn as_cuda_device(&self) -> Result<&crate::CudaDevice> {
         match self {
             Self::Cuda(d) => Ok(d),
             Self::Cpu => crate::bail!("expected a cuda device, got cpu"),
+            Self::Hip(_) => crate::bail!("expected a cuda device, got hip"),
             Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
+        }
+    }
+
+    pub fn as_hip_device(&self) -> Result<&crate::HipDevice> {
+        match self {
+            Self::Cuda(_) => crate::bail!("expected a hip device, got cuda"),
+            Self::Cpu => crate::bail!("expected a hip device, got cpu"),
+            Self::Hip(d) => Ok(d),
+            Self::Metal(_) => crate::bail!("expected a hip device, got Metal"),
         }
     }
 
@@ -247,6 +263,7 @@ impl Device {
         match self {
             Self::Cuda(_) => crate::bail!("expected a metal device, got cuda"),
             Self::Cpu => crate::bail!("expected a metal device, got cpu"),
+            Self::Hip(_) => crate::bail!("expected a metal device, got hip"),
             Self::Metal(d) => Ok(d),
         }
     }
@@ -263,6 +280,7 @@ impl Device {
         match self {
             Self::Cpu => CpuDevice.set_seed(seed),
             Self::Cuda(c) => c.set_seed(seed),
+            Self::Hip(h) => h.set_seed(seed),
             Self::Metal(m) => m.set_seed(seed),
         }
     }
@@ -271,6 +289,7 @@ impl Device {
         match self {
             Self::Cpu => CpuDevice.get_current_seed(),
             Self::Cuda(c) => c.get_current_seed(),
+            Self::Hip(h) => h.get_current_seed(),
             Self::Metal(m) => m.get_current_seed(),
         }
     }
@@ -279,6 +298,7 @@ impl Device {
         match (self, rhs) {
             (Self::Cpu, Self::Cpu) => true,
             (Self::Cuda(lhs), Self::Cuda(rhs)) => lhs.same_device(rhs),
+            (Self::Hip(lhs), Self::Hip(rhs)) => lhs.same_device(rhs),
             (Self::Metal(lhs), Self::Metal(rhs)) => lhs.same_device(rhs),
             _ => false,
         }
@@ -288,6 +308,7 @@ impl Device {
         match self {
             Self::Cpu => DeviceLocation::Cpu,
             Self::Cuda(device) => device.location(),
+            Self::Hip(device) => device.location(),
             Device::Metal(device) => device.location(),
         }
     }
@@ -300,13 +321,17 @@ impl Device {
         matches!(self, Self::Cuda(_))
     }
 
+    pub fn is_hip(&self) -> bool {
+        matches!(self, Self::Hip(_))
+    }
+
     pub fn is_metal(&self) -> bool {
         matches!(self, Self::Metal(_))
     }
 
     pub fn supports_bf16(&self) -> bool {
         match self {
-            Self::Cuda(_) | Self::Metal(_) => true,
+            Self::Cuda(_) | Self::Hip(_) | Self::Metal(_) => true,
             Self::Cpu => false,
         }
     }
@@ -336,6 +361,14 @@ impl Device {
         }
     }
 
+    pub fn hip_if_available(ordinal: usize) -> Result<Self> {
+        if crate::utils::hip_is_available() {
+            Self::new_hip(ordinal)
+        } else {
+            Ok(Self::Cpu)
+        }
+    }
+
     pub(crate) fn rand_uniform_f64(
         &self,
         lo: f64,
@@ -357,6 +390,10 @@ impl Device {
                     let storage = device.rand_uniform(shape, dtype, lo, up)?;
                     Ok(Storage::Cuda(storage))
                 }
+            }
+            Device::Hip(device) => {
+                let storage = device.rand_uniform(shape, dtype, lo, up)?;
+                Ok(Storage::Hip(storage))
             }
             Device::Metal(device) => {
                 let storage = device.rand_uniform(shape, dtype, lo, up)?;
@@ -396,6 +433,10 @@ impl Device {
                     Ok(Storage::Cuda(storage))
                 }
             }
+            Device::Hip(device) => {
+                let storage = device.rand_normal(shape, dtype, mean, std)?;
+                Ok(Storage::Hip(storage))
+            }
             Device::Metal(device) => {
                 let storage = device.rand_normal(shape, dtype, mean, std)?;
                 Ok(Storage::Metal(storage))
@@ -422,6 +463,10 @@ impl Device {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Cuda(storage))
             }
+            Device::Hip(device) => {
+                let storage = device.zeros_impl(shape, dtype)?;
+                Ok(Storage::Hip(storage))
+            }
             Device::Metal(device) => {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Metal(storage))
@@ -439,6 +484,10 @@ impl Device {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Cuda(storage))
             }
+            Device::Hip(device) => {
+                let storage = device.alloc_uninit(shape, dtype)?;
+                Ok(Storage::Hip(storage))
+            }
             Device::Metal(device) => {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Metal(storage))
@@ -452,6 +501,10 @@ impl Device {
             Device::Cuda(device) => {
                 let storage = device.storage_from_slice(data)?;
                 Ok(Storage::Cuda(storage))
+            }
+            Device::Hip(device) => {
+                let storage = device.storage_from_slice(data)?;
+                Ok(Storage::Hip(storage))
             }
             Device::Metal(device) => {
                 let storage = device.storage_from_slice(data)?;
@@ -467,6 +520,11 @@ impl Device {
                 let storage = array.to_cpu_storage();
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Cuda(storage))
+            }
+            Device::Hip(device) => {
+                let storage = array.to_cpu_storage();
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Hip(storage))
             }
             Device::Metal(device) => {
                 let storage = array.to_cpu_storage();
@@ -484,6 +542,11 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Cuda(storage))
             }
+            Device::Hip(device) => {
+                let storage = S::to_cpu_storage_owned(data);
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Hip(storage))
+            }
             Device::Metal(device) => {
                 let storage = S::to_cpu_storage_owned(data);
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
@@ -496,6 +559,7 @@ impl Device {
         match self {
             Self::Cpu => Ok(()),
             Self::Cuda(d) => d.synchronize(),
+            Self::Hip(d) => d.synchronize(),
             Self::Metal(d) => d.synchronize(),
         }
     }

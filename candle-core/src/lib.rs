@@ -63,6 +63,7 @@ pub mod display;
 mod dtype;
 pub mod dummy_cuda_backend;
 pub mod dummy_dtype;
+pub mod dummy_hip_backend;
 mod dummy_metal_backend;
 pub mod error;
 mod indexer;
@@ -118,6 +119,9 @@ pub use cuda_backend as cuda;
 pub use dummy_cuda_backend as cuda;
 
 pub use cuda::{CudaDevice, CudaStorage};
+
+pub use dummy_hip_backend as hip;
+pub use hip::{HipDevice, HipStorage};
 
 #[cfg(feature = "metal")]
 pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
