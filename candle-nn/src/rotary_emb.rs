@@ -223,6 +223,23 @@ impl candle::CustomOp3 for RotaryEmbI {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::BackendStorage;
+        let (cpu_storage, shape) =
+            self.cpu_fwd(s1.cpu_storage(), l1, s2.cpu_storage(), l2, s3.cpu_storage(), l3)?;
+        let hip_storage = candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+        Ok((hip_storage, shape))
+    }
 }
 
 fn rope_check_cs(cs: &Tensor, b_sz: usize) -> Result<(usize, usize)> {
@@ -507,6 +524,23 @@ impl candle::CustomOp3 for RotaryEmb {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::BackendStorage;
+        let (cpu_storage, shape) =
+            self.cpu_fwd(s1.cpu_storage(), l1, s2.cpu_storage(), l2, s3.cpu_storage(), l3)?;
+        let hip_storage = candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+        Ok((hip_storage, shape))
+    }
 }
 
 pub fn rope(xs: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
@@ -777,6 +811,23 @@ impl candle::CustomOp3 for RotaryEmbThd {
         .map_err(candle::Error::wrap)?;
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::BackendStorage;
+        let (cpu_storage, shape) =
+            self.cpu_fwd(s1.cpu_storage(), l1, s2.cpu_storage(), l2, s3.cpu_storage(), l3)?;
+        let hip_storage = candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+        Ok((hip_storage, shape))
     }
 }
 

@@ -1,6 +1,7 @@
 //! Tensor ops.
 //!
 
+use candle::backend::BackendStorage;
 use candle::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor, D};
 use rayon::prelude::*;
 
@@ -201,6 +202,18 @@ impl candle::CustomOp1 for Sigmoid {
 
         let new_storage = candle::MetalStorage::new(buffer, device.clone(), el_count, dtype);
         Ok((new_storage, layout.shape().clone()))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        storage: &candle::HipStorage,
+        layout: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        let (cpu_storage, shape) = self.cpu_fwd(storage.cpu_storage(), layout)?;
+        let hip_storage =
+            candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+        Ok((hip_storage, shape))
     }
 
     fn bwd(&self, _arg: &Tensor, res: &Tensor, grad_res: &Tensor) -> Result<Option<Tensor>> {
@@ -423,6 +436,18 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         let newstorage =
             candle::MetalStorage::new(output, device.clone(), elem_count, storage.dtype());
         Ok((newstorage, layout.shape().clone()))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        storage: &candle::HipStorage,
+        layout: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        let (cpu_storage, shape) = self.cpu_fwd(storage.cpu_storage(), layout)?;
+        let hip_storage =
+            candle::HipStorage::wrap_cpu_storage(cpu_storage, storage.device().clone());
+        Ok((hip_storage, shape))
     }
 }
 
