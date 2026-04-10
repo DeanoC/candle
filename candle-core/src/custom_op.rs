@@ -1,6 +1,6 @@
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
-use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Tensor};
+use crate::{CpuStorage, CudaStorage, HipStorage, Layout, MetalStorage, Result, Shape, Tensor};
 use std::sync::Arc;
 
 /// Unary ops that can be defined in user-land.
@@ -17,6 +17,14 @@ pub trait CustomOp1 {
     fn cuda_fwd(&self, _storage: &CudaStorage, _layout: &Layout) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(&self, _storage: &HipStorage, _layout: &Layout) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -64,6 +72,20 @@ pub trait CustomOp2 {
     ) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(
+        &self,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -120,6 +142,22 @@ pub trait CustomOp3 {
     ) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(
+        &self,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -182,6 +220,22 @@ pub trait CustomOp4 {
         ))
     }
 
+    fn hip_fwd(
+        &self,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
+        ))
+    }
+
     fn metal_fwd(
         &self,
         _: &MetalStorage,
@@ -235,6 +289,26 @@ pub trait CustomOp6 {
     ) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn hip_fwd(
+        &self,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -299,6 +373,28 @@ pub trait CustomOp7 {
     ) -> Result<(CudaStorage, Shape)> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    fn hip_fwd(
+        &self,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<(HipStorage, Shape)> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -515,6 +611,14 @@ pub trait InplaceOp1 {
         ))
     }
 
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(&self, _storage: &mut HipStorage, _layout: &Layout) -> Result<()> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
+        ))
+    }
+
     /// The forward pass, as run on a metal gpu device. Note that the storage can use arbitrary strides,
     /// offsets etc so the associated layout should be used to access it.
     fn metal_fwd(&self, _storage: &mut MetalStorage, _layout: &Layout) -> Result<()> {
@@ -537,6 +641,14 @@ pub trait InplaceOp2 {
     fn cuda_fwd(&self, _: &mut CudaStorage, _: &Layout, _: &CudaStorage, _: &Layout) -> Result<()> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(&self, _: &mut HipStorage, _: &Layout, _: &HipStorage, _: &Layout) -> Result<()> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 
@@ -583,6 +695,22 @@ pub trait InplaceOp3 {
     ) -> Result<()> {
         Err(crate::Error::Cuda(
             format!("no cuda implementation for {}", self.name()).into(),
+        ))
+    }
+
+    /// The forward pass, as run on a hip gpu device. Note that the storage can use arbitrary strides,
+    /// offsets etc so the associated layout should be used to access it.
+    fn hip_fwd(
+        &self,
+        _: &mut HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+        _: &HipStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        Err(crate::Error::Hip(
+            format!("no hip implementation for {}", self.name()).into(),
         ))
     }
 

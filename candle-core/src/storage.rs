@@ -1,7 +1,9 @@
 use crate::backend::BackendStorage;
 use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
-use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
+use crate::{
+    CpuStorage, CudaStorage, DType, Device, Error, HipStorage, Layout, MetalStorage, Result, Shape,
+};
 use crate::{
     CustomOp1, CustomOp2, CustomOp3, CustomOp4, CustomOp6, CustomOp7, InplaceOp1, InplaceOp2,
     InplaceOp3,
@@ -13,6 +15,7 @@ use crate::{
 pub enum Storage {
     Cpu(CpuStorage),
     Cuda(CudaStorage),
+    Hip(HipStorage),
     Metal(MetalStorage),
 }
 
@@ -23,6 +26,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.try_clone(layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Hip(storage) => {
+                let storage = storage.try_clone(layout)?;
+                Ok(Self::Hip(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.try_clone(layout)?;
@@ -35,6 +42,7 @@ impl Storage {
         match self {
             Self::Cpu(_) => Device::Cpu,
             Self::Cuda(storage) => Device::Cuda(storage.device().clone()),
+            Self::Hip(storage) => Device::Hip(storage.device().clone()),
             Self::Metal(storage) => Device::Metal(storage.device().clone()),
         }
     }
@@ -43,6 +51,7 @@ impl Storage {
         match self {
             Self::Cpu(storage) => storage.dtype(),
             Self::Cuda(storage) => storage.dtype(),
+            Self::Hip(storage) => storage.dtype(),
             Self::Metal(storage) => storage.dtype(),
         }
     }
@@ -81,6 +90,7 @@ impl Storage {
         match self {
             Storage::Cpu(storage) => storage.const_set(v, l),
             Storage::Cuda(storage) => storage.const_set(v, l),
+            Storage::Hip(storage) => storage.const_set(v, l),
             Storage::Metal(storage) => storage.const_set(v, l),
         }
     }
@@ -94,6 +104,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.affine(layout, mul, add)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Hip(storage) => {
+                let storage = storage.affine(layout, mul, add)?;
+                Ok(Self::Hip(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.affine(layout, mul, add)?;
@@ -112,6 +126,10 @@ impl Storage {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.powf(layout, alpha)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Metal(storage))
@@ -128,6 +146,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.elu(layout, alpha)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Hip(storage) => {
+                let storage = storage.elu(layout, alpha)?;
+                Ok(Self::Hip(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.elu(layout, alpha)?;
@@ -153,6 +175,10 @@ impl Storage {
             (Self::Cuda(lhs), Self::Cuda(rhs)) => {
                 let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            (Self::Hip(lhs), Self::Hip(rhs)) => {
+                let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::Hip(storage))
             }
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
@@ -181,6 +207,10 @@ impl Storage {
                 let storage = storage.reduce_op(op, layout, s)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.reduce_op(op, layout, s)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.reduce_op(op, layout, s)?;
                 Ok(Self::Metal(storage))
@@ -198,6 +228,10 @@ impl Storage {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.to_dtype(layout, dtype)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Metal(storage))
@@ -214,6 +248,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let (storage, shape) = c.cuda_fwd(storage, l)?;
                 Ok((Self::Cuda(storage), shape))
+            }
+            Self::Hip(storage) => {
+                let (storage, shape) = c.hip_fwd(storage, l)?;
+                Ok((Self::Hip(storage), shape))
             }
             Self::Metal(storage) => {
                 let (storage, shape) = c.metal_fwd(storage, l)?;
@@ -238,6 +276,10 @@ impl Storage {
             (Self::Cuda(s1), Self::Cuda(s2)) => {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2)?;
                 Ok((Self::Cuda(s), shape))
+            }
+            (Self::Hip(s1), Self::Hip(s2)) => {
+                let (s, shape) = c.hip_fwd(s1, l1, s2, l2)?;
+                Ok((Self::Hip(s), shape))
             }
             (Self::Metal(s1), Self::Metal(s2)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2)?;
@@ -266,6 +308,10 @@ impl Storage {
             (Self::Cuda(s1), Self::Cuda(s2), Self::Cuda(s3)) => {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Cuda(s), shape))
+            }
+            (Self::Hip(s1), Self::Hip(s2), Self::Hip(s3)) => {
+                let (s, shape) = c.hip_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::Hip(s), shape))
             }
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3)?;
@@ -297,6 +343,10 @@ impl Storage {
             (Self::Cuda(s1), Self::Cuda(s2), Self::Cuda(s3), Self::Cuda(s4)) => {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
                 Ok((Self::Cuda(s), shape))
+            }
+            (Self::Hip(s1), Self::Hip(s2), Self::Hip(s3), Self::Hip(s4)) => {
+                let (s, shape) = c.hip_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
+                Ok((Self::Hip(s), shape))
             }
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3), Self::Metal(s4)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3, s4, l4)?;
@@ -348,6 +398,17 @@ impl Storage {
             ) => {
                 let (s, shape) = c.cuda_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6)?;
                 Ok((Self::Cuda(s), shape))
+            }
+            (
+                Self::Hip(s1),
+                Self::Hip(s2),
+                Self::Hip(s3),
+                Self::Hip(s4),
+                Self::Hip(s5),
+                Self::Hip(s6),
+            ) => {
+                let (s, shape) = c.hip_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6)?;
+                Ok((Self::Hip(s), shape))
             }
             (
                 Self::Metal(s1),
@@ -415,6 +476,19 @@ impl Storage {
                 Ok((Self::Cuda(s), shape))
             }
             (
+                Self::Hip(s1),
+                Self::Hip(s2),
+                Self::Hip(s3),
+                Self::Hip(s4),
+                Self::Hip(s5),
+                Self::Hip(s6),
+                Self::Hip(s7),
+            ) => {
+                let (s, shape) =
+                    c.hip_fwd(s1, l1, s2, l2, s3, l3, s4, l4, s5, l5, s6, l6, s7, l7)?;
+                Ok((Self::Hip(s), shape))
+            }
+            (
                 Self::Metal(s1),
                 Self::Metal(s2),
                 Self::Metal(s3),
@@ -435,6 +509,7 @@ impl Storage {
         match self {
             Self::Cpu(storage) => c.cpu_fwd(storage, l),
             Self::Cuda(storage) => c.cuda_fwd(storage, l),
+            Self::Hip(storage) => c.hip_fwd(storage, l),
             Self::Metal(storage) => c.metal_fwd(storage, l),
         }
     }
@@ -450,6 +525,7 @@ impl Storage {
         match (self, t2) {
             (Self::Cpu(s1), Self::Cpu(s2)) => c.cpu_fwd(s1, l1, s2, l2),
             (Self::Cuda(s1), Self::Cuda(s2)) => c.cuda_fwd(s1, l1, s2, l2),
+            (Self::Hip(s1), Self::Hip(s2)) => c.hip_fwd(s1, l1, s2, l2),
             (Self::Metal(s1), Self::Metal(s2)) => c.metal_fwd(s1, l1, s2, l2),
             _ => unreachable!(),
         }
@@ -469,6 +545,7 @@ impl Storage {
         match (self, t2, t3) {
             (Self::Cpu(s1), Self::Cpu(s2), Self::Cpu(s3)) => c.cpu_fwd(s1, l1, s2, l2, s3, l3),
             (Self::Cuda(s1), Self::Cuda(s2), Self::Cuda(s3)) => c.cuda_fwd(s1, l1, s2, l2, s3, l3),
+            (Self::Hip(s1), Self::Hip(s2), Self::Hip(s3)) => c.hip_fwd(s1, l1, s2, l2, s3, l3),
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 c.metal_fwd(s1, l1, s2, l2, s3, l3)
             }
@@ -485,6 +562,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Hip(storage) => {
+                let storage = storage.unary_impl::<B>(layout)?;
+                Ok(Self::Hip(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
@@ -509,6 +590,10 @@ impl Storage {
             (Self::Cuda(lhs), Self::Cuda(rhs)) => {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Cuda(storage))
+            }
+            (Self::Hip(lhs), Self::Hip(rhs)) => {
+                let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::Hip(storage))
             }
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
@@ -545,6 +630,10 @@ impl Storage {
                 let s = inp.conv1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Cuda(s))
             }
+            (Storage::Hip(inp), Storage::Hip(kernel)) => {
+                let s = inp.conv1d(l, kernel, kernel_l, params)?;
+                Ok(Self::Hip(s))
+            }
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
@@ -575,6 +664,10 @@ impl Storage {
             (Storage::Cuda(inp), Storage::Cuda(kernel)) => {
                 let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Cuda(s))
+            }
+            (Storage::Hip(inp), Storage::Hip(kernel)) => {
+                let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
+                Ok(Self::Hip(s))
             }
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
@@ -607,6 +700,10 @@ impl Storage {
                 let s = inp.conv2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Cuda(s))
             }
+            (Storage::Hip(inp), Storage::Hip(kernel)) => {
+                let s = inp.conv2d(l, kernel, kernel_l, params)?;
+                Ok(Self::Hip(s))
+            }
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
@@ -638,6 +735,10 @@ impl Storage {
                 let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Cuda(s))
             }
+            (Storage::Hip(inp), Storage::Hip(kernel)) => {
+                let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
+                Ok(Self::Hip(s))
+            }
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
@@ -666,6 +767,10 @@ impl Storage {
                 let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
@@ -688,6 +793,10 @@ impl Storage {
                 let storage = storage.max_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.max_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.max_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
@@ -705,6 +814,10 @@ impl Storage {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage = storage.upsample_nearest1d(layout, sz)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Metal(storage))
@@ -721,6 +834,10 @@ impl Storage {
             Self::Cuda(storage) => {
                 let storage = storage.upsample_nearest2d(layout, h, w)?;
                 Ok(Self::Cuda(storage))
+            }
+            Self::Hip(storage) => {
+                let storage = storage.upsample_nearest2d(layout, h, w)?;
+                Ok(Self::Hip(storage))
             }
             Self::Metal(storage) => {
                 let storage = storage.upsample_nearest2d(layout, h, w)?;
@@ -749,6 +866,11 @@ impl Storage {
                     storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
                 Ok(Self::Cuda(storage))
             }
+            Self::Hip(storage) => {
+                let storage =
+                    storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
+                Ok(Self::Hip(storage))
+            }
             Self::Metal(storage) => {
                 let storage =
                     storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
@@ -776,6 +898,10 @@ impl Storage {
             (Self::Cuda(cond), Self::Cuda(t), Self::Cuda(f)) => {
                 let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
                 Ok(Self::Cuda(storage))
+            }
+            (Self::Hip(cond), Self::Hip(t), Self::Hip(f)) => {
+                let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
+                Ok(Self::Hip(storage))
             }
             (Self::Metal(cond), Self::Metal(t), Self::Metal(f)) => {
                 let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
@@ -807,6 +933,10 @@ impl Storage {
                 let storage = s.gather(l, indexes, indexes_l, d)?;
                 Ok(Self::Cuda(storage))
             }
+            (Self::Hip(s), Self::Hip(indexes)) => {
+                let storage = s.gather(l, indexes, indexes_l, d)?;
+                Ok(Self::Hip(storage))
+            }
             (Self::Metal(s), Self::Metal(indexes)) => {
                 let storage = s.gather(l, indexes, indexes_l, d)?;
                 Ok(Self::Metal(storage))
@@ -833,6 +963,9 @@ impl Storage {
             (Self::Cuda(s), Self::Cuda(indexes), Self::Cuda(source)) => {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
+            (Self::Hip(s), Self::Hip(indexes), Self::Hip(source)) => {
+                s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
@@ -857,6 +990,9 @@ impl Storage {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Cuda(s), Self::Cuda(indexes), Self::Cuda(source)) => {
+                s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            (Self::Hip(s), Self::Hip(indexes), Self::Hip(source)) => {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
@@ -886,6 +1022,10 @@ impl Storage {
             (Self::Cuda(s), Self::Cuda(indexes), Self::Cuda(source)) => {
                 let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
                 Ok(Self::Cuda(storage))
+            }
+            (Self::Hip(s), Self::Hip(indexes), Self::Hip(source)) => {
+                let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
+                Ok(Self::Hip(storage))
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
                 let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
