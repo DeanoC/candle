@@ -790,7 +790,7 @@ __device__ inline void linear_decode_from_projected_gated_impl(
     const T *prev_conv_state,
     const T *weights,
     const T *value_cache_pack,
-    const float *initial_state,
+    float *state,
     const T *norm_weight,
     float *out,
     size_t pair,
@@ -819,9 +819,7 @@ __device__ inline void linear_decode_from_projected_gated_impl(
     const int state_batch_base = batch * conv_dim * state_len;
     const int state_head_base =
         ((batch * num_v_heads + v_head) * head_k_dim) * head_v_dim + v_idx;
-    const int out_base =
-        batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + value_dim +
-        (v_head * head_k_dim) * head_v_dim + v_idx;
+    const int out_base = batch * value_dim + v_head * head_v_dim + v_idx;
 
     auto conv_channel = [&](int channel) -> float {
         const int weight_base = channel * kernel_size;
@@ -878,30 +876,28 @@ __device__ inline void linear_decode_from_projected_gated_impl(
     g_exp = shared_sq_sum[1];
 
     float out_value = 0.0f;
-    float state[MAX_K];
+    float state_regs[MAX_K];
     if (active) {
-        const int value_offset = projected_batch_base + key_dim * 2 + v_head * head_v_dim + v_idx;
         const int gate_offset = projected_batch_base + conv_dim + v_head * head_v_dim + v_idx;
         const float value = conv_channel(key_dim * 2 + v_head * head_v_dim + v_idx);
         for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
-            state[k_idx] = initial_state[state_head_base + k_idx * head_v_dim] * g_exp;
+            state_regs[k_idx] = state[state_head_base + k_idx * head_v_dim] * g_exp;
         }
         float kv_mem = 0.0f;
         for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
-            kv_mem += state[k_idx] * shared_k[k_idx];
+            kv_mem += state_regs[k_idx] * shared_k[k_idx];
         }
         const float delta = (value - kv_mem) * beta;
         for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
-            state[k_idx] += shared_k[k_idx] * delta;
-            out_value += state[k_idx] * shared_q[k_idx];
-            out[out_base + k_idx * head_v_dim] = state[k_idx];
+            state_regs[k_idx] += shared_k[k_idx] * delta;
+            out_value += state_regs[k_idx] * shared_q[k_idx];
+            state[state_head_base + k_idx * head_v_dim] = state_regs[k_idx];
         }
         const float gate_x = qwen35_to_float(projected[gate_offset]);
         const float gate_silu = gate_x * qwen35_sigmoid_fast(gate_x);
         const float w = qwen35_to_float(norm_weight[v_idx]);
         shared_sq_sum[(threadIdx.x >> 5)] = 0.0f;
-        out[batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + v_head * head_v_dim + v_idx] =
-            out_value * gate_silu * w; // temporary, normalized below
+        out[out_base] = out_value * gate_silu * w; // temporary, normalized below
     }
 
     float sq_sum = active ? out_value * out_value : 0.0f;
@@ -928,8 +924,7 @@ __device__ inline void linear_decode_from_projected_gated_impl(
         const float gate_x = qwen35_to_float(projected[gate_offset]);
         const float gate_silu = gate_x * qwen35_sigmoid_fast(gate_x);
         const float w = qwen35_to_float(norm_weight[v_idx]);
-        out[batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + v_head * head_v_dim + v_idx] =
-            out_value * inv_rms * gate_silu * w;
+        out[out_base] = out_value * inv_rms * gate_silu * w;
     }
 }
 
@@ -1689,7 +1684,7 @@ extern "C" __global__ void name( \
     const type *prev_conv_state, \
     const type *weights, \
     const type *value_cache_pack, \
-    const float *initial_state, \
+    float *state, \
     const type *norm_weight, \
     float *out \
 ) { \
@@ -1697,7 +1692,7 @@ extern "C" __global__ void name( \
     const size_t tid = static_cast<size_t>(threadIdx.x); \
     linear_decode_from_projected_gated_impl<type>( \
         batch_size, num_v_heads, head_k_dim, head_v_dim, state_len, kernel_size, head_repeat, \
-        eps, projected, prev_conv_state, weights, value_cache_pack, initial_state, norm_weight, \
+        eps, projected, prev_conv_state, weights, value_cache_pack, state, norm_weight, \
         out, pair, tid); \
 }
 
