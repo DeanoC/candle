@@ -1075,6 +1075,7 @@ fn hip_memcpy_host_to_device(
     let dst = dst
         .map(NonNull::as_ptr)
         .ok_or_else(|| Error::Msg("missing HIP destination pointer".into()).bt())?;
+    let _host_registration = HipHostRegistration::best_effort(src, len_bytes);
     hip_status(
         unsafe { hipMemcpy(dst, src, len_bytes, HIP_MEMCPY_HOST_TO_DEVICE) },
         "hipMemcpy H2D",
@@ -1262,6 +1263,41 @@ fn dtype_elem_size(dtype: DType) -> Result<usize> {
     }
 }
 
+fn hip_register_host_uploads_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("CANDLE_HIP_REGISTER_HOST_UPLOADS").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        )
+    })
+}
+
+struct HipHostRegistration {
+    ptr: *const c_void,
+}
+
+impl HipHostRegistration {
+    fn best_effort(ptr: *const c_void, len_bytes: usize) -> Option<Self> {
+        if !hip_register_host_uploads_enabled() || ptr.is_null() || len_bytes == 0 {
+            return None;
+        }
+        let status = unsafe { hipHostRegister(ptr as *mut c_void, len_bytes, 0) };
+        if status != 0 {
+            return None;
+        }
+        Some(Self { ptr })
+    }
+}
+
+impl Drop for HipHostRegistration {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = hipHostUnregister(self.ptr as *mut c_void);
+        }
+    }
+}
+
 #[link(name = "amdhip64")]
 unsafe extern "C" {
     fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> c_int;
@@ -1277,6 +1313,8 @@ unsafe extern "C" {
         kind: c_int,
     ) -> c_int;
     fn hipMemset(dst: *mut c_void, value: c_int, size: usize) -> c_int;
+    fn hipHostRegister(host_ptr: *mut c_void, size: usize, flags: c_int) -> c_int;
+    fn hipHostUnregister(host_ptr: *mut c_void) -> c_int;
     fn hipGetDevice(device: *mut c_int) -> c_int;
     fn hipSetDevice(device: c_int) -> c_int;
     fn hipDeviceSynchronize() -> c_int;
