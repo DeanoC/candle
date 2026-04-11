@@ -1,5 +1,5 @@
 #[cfg(feature = "hip")]
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 #[cfg(feature = "hip")]
 use candle_core::D;
 #[cfg(feature = "hip")]
@@ -181,6 +181,40 @@ fn hip_reduce_max_last_dim_matches_cpu_without_host_staging() -> Result<()> {
     assert_eq!(counters.host_to_device_bytes, 0);
     assert_eq!(counters.device_to_host_bytes, 0);
     assert!(max_diff(&cpu_out, &hip_out)? < 1e-5);
+    Ok(())
+}
+
+#[cfg(feature = "hip")]
+#[test]
+fn hip_reduce_sum_last_dim_handles_zero_rows() -> Result<()> {
+    let _guard = HIP_TEST_LOCK.lock().unwrap();
+    let cpu = Device::Cpu;
+    let hip = Device::new_hip(0)?;
+
+    let xs = Tensor::zeros((0usize, 3usize), DType::F32, &cpu)?;
+    let cpu_out = xs.sum_keepdim(D::Minus1)?;
+
+    let xs_hip = xs.to_device(&hip)?;
+    let hip_out = xs_hip.sum_keepdim(D::Minus1)?;
+    assert_eq!(cpu_out.dims(), hip_out.dims());
+    assert_eq!(cpu_out.to_vec2::<f32>()?, hip_out.to_vec2::<f32>()?);
+    Ok(())
+}
+
+#[cfg(feature = "hip")]
+#[test]
+fn hip_reduce_sum_last_dim_handles_zero_cols() -> Result<()> {
+    let _guard = HIP_TEST_LOCK.lock().unwrap();
+    let cpu = Device::Cpu;
+    let hip = Device::new_hip(0)?;
+
+    let xs = Tensor::zeros((2usize, 0usize), DType::F32, &cpu)?;
+    let cpu_out = xs.sum_keepdim(D::Minus1)?;
+
+    let xs_hip = xs.to_device(&hip)?;
+    let hip_out = xs_hip.sum_keepdim(D::Minus1)?;
+    assert_eq!(cpu_out.dims(), hip_out.dims());
+    assert_eq!(cpu_out.to_vec2::<f32>()?, hip_out.to_vec2::<f32>()?);
     Ok(())
 }
 

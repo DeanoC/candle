@@ -419,17 +419,12 @@ impl BackendStorage for HipStorage {
             ReduceOp::Max => 2,
             _ => return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims)),
         };
-        let n_rows = src_dims[..reduce_start]
-            .iter()
-            .copied()
-            .product::<usize>()
-            .max(1);
-        let n_cols = src_dims[reduce_start..]
-            .iter()
-            .copied()
-            .product::<usize>()
-            .max(1);
+        let n_rows = src_dims[..reduce_start].iter().copied().product::<usize>();
+        let n_cols = src_dims[reduce_start..].iter().copied().product::<usize>();
         let output = Self::alloc_uninit(&self.device, n_rows, self.dtype)?;
+        if n_rows == 0 || n_cols == 0 {
+            return self.cpu_fallback_map(|cpu| cpu.reduce_op(op, layout, dims));
+        }
         let status = unsafe {
             ffi::candle_hip_reduce_contiguous(
                 op_code,
