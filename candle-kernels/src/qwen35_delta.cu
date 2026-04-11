@@ -62,6 +62,31 @@ __device__ inline float qwen35_softplus_fast(float x) {
     return log1pf(qwen35_exp_fast(x));
 }
 
+template <typename T, typename IndexT>
+__device__ inline void embedding_lookup_impl(
+    size_t token_count,
+    size_t vocab_size,
+    size_t hidden_size,
+    const T *embeddings,
+    const IndexT *indexes,
+    T *out,
+    size_t tid
+) {
+    const size_t total_elems = token_count * hidden_size;
+    if (tid >= total_elems) {
+        return;
+    }
+
+    const size_t token_idx = tid / hidden_size;
+    const size_t hidden_idx = tid - token_idx * hidden_size;
+    const size_t row = static_cast<size_t>(indexes[token_idx]);
+    if (row >= vocab_size) {
+        out[tid] = qwen35_from_float<T>(0.0f);
+        return;
+    }
+    out[tid] = embeddings[row * hidden_size + hidden_idx];
+}
+
 template <typename T>
 __device__ inline void linear_prefill_conv_pack_impl(
     size_t batch_size,
@@ -765,6 +790,20 @@ extern "C" __global__ void name( \
         batch_size, conv_dim, total_len, seq_len, kernel_size, mixed_qkv, weights, out, tid); \
 }
 
+#define DEFINE_EMBEDDING_LOOKUP_KERNEL(name, type, index_type) \
+extern "C" __global__ void name( \
+    size_t token_count, \
+    size_t vocab_size, \
+    size_t hidden_size, \
+    const type *embeddings, \
+    const index_type *indexes, \
+    type *out \
+) { \
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; \
+    embedding_lookup_impl<type, index_type>( \
+        token_count, vocab_size, hidden_size, embeddings, indexes, out, tid); \
+}
+
 #define DEFINE_FULL_ATTN_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -949,6 +988,10 @@ extern "C" __global__ void name( \
 DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(linear_prefill_conv_pack_f16, half)
 DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(linear_prefill_conv_pack_f32, float)
 DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(linear_prefill_conv_pack_bf16, __nv_bfloat16)
+
+DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_f16, half, uint32_t)
+DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_f32, float, uint32_t)
+DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_bf16, __nv_bfloat16, uint32_t)
 
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
