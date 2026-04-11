@@ -684,6 +684,98 @@ __device__ inline void linear_decode_apply_impl(
         out_value;
 }
 
+template <typename T, int MAX_K = 256>
+__device__ inline void linear_decode_apply_gated_impl(
+    int batch_size,
+    int num_v_heads,
+    int head_k_dim,
+    int head_v_dim,
+    float eps,
+    const float *packed,
+    const float *initial_state,
+    const T *gate,
+    const T *weight,
+    float *out,
+    size_t pair,
+    size_t tid
+) {
+    const int total_pairs = batch_size * num_v_heads;
+    if (pair >= static_cast<size_t>(total_pairs) || head_k_dim > MAX_K) {
+        return;
+    }
+    const bool active = tid < static_cast<size_t>(head_v_dim);
+
+    __shared__ float shared_sq_sum[32];
+
+    const int value_dim = num_v_heads * head_v_dim;
+    const int packed_width = 2 * head_k_dim + head_v_dim + 2;
+    const int batch = static_cast<int>(pair) / num_v_heads;
+    const int v_head = static_cast<int>(pair) - batch * num_v_heads;
+    const int v_idx = static_cast<int>(tid);
+    const int pair_base = static_cast<int>(pair) * packed_width;
+    const int state_head_base =
+        ((batch * num_v_heads + v_head) * head_k_dim) * head_v_dim + v_idx;
+    const int out_base =
+        batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + value_dim +
+        (v_head * head_k_dim) * head_v_dim + v_idx;
+
+    const float *q = packed + pair_base;
+    const float *k = packed + pair_base + head_k_dim;
+    const float *value = packed + pair_base + 2 * head_k_dim;
+    const float beta = packed[pair_base + 2 * head_k_dim + head_v_dim];
+    const float g_exp = packed[pair_base + 2 * head_k_dim + head_v_dim + 1];
+
+    float out_value = 0.0f;
+    float state[MAX_K];
+    if (active) {
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            state[k_idx] = initial_state[state_head_base + k_idx * head_v_dim] * g_exp;
+        }
+
+        float kv_mem = 0.0f;
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            kv_mem += state[k_idx] * k[k_idx];
+        }
+        const float delta = (value[v_idx] - kv_mem) * beta;
+
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            state[k_idx] += k[k_idx] * delta;
+            out_value += state[k_idx] * q[k_idx];
+            out[out_base + k_idx * head_v_dim] = state[k_idx];
+        }
+    }
+
+    const unsigned lane = static_cast<unsigned>(threadIdx.x & 31);
+    const unsigned warp = static_cast<unsigned>(threadIdx.x >> 5);
+    float sq_sum = out_value * out_value;
+    sq_sum = qwen35_warp_reduce_sum(sq_sum);
+    if (lane == 0) {
+        shared_sq_sum[warp] = sq_sum;
+    }
+    __syncthreads();
+
+    float total_sq_sum = (threadIdx.x < 32)
+        ? ((threadIdx.x < ((blockDim.x + 31) >> 5)) ? shared_sq_sum[threadIdx.x] : 0.0f)
+        : 0.0f;
+    if (warp == 0) {
+        total_sq_sum = qwen35_warp_reduce_sum(total_sq_sum);
+        if (lane == 0) {
+            shared_sq_sum[0] = total_sq_sum;
+        }
+    }
+    __syncthreads();
+
+    const float inv_rms = rsqrtf(shared_sq_sum[0] / static_cast<float>(head_v_dim) + eps);
+    if (active) {
+        const int gate_row_offset = static_cast<int>(pair) * head_v_dim;
+        const float gate_x = qwen35_to_float(gate[gate_row_offset + v_idx]);
+        const float gate_silu = gate_x * qwen35_sigmoid_fast(gate_x);
+        const float norm_weight = qwen35_to_float(weight[v_idx]);
+        out[batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + v_head * head_v_dim + v_idx] =
+            out_value * inv_rms * norm_weight * gate_silu;
+    }
+}
+
 template <typename T, int MAX_HEAD_DIM = 128>
 __device__ inline void full_attention_prefill_impl(
     size_t batch_size,
@@ -1406,6 +1498,26 @@ extern "C" __global__ void name( \
         batch_size, num_v_heads, head_k_dim, head_v_dim, packed, initial_state, out, pair, tid); \
 }
 
+#define DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    int batch_size, \
+    int num_v_heads, \
+    int head_k_dim, \
+    int head_v_dim, \
+    float eps, \
+    const float *packed, \
+    const float *initial_state, \
+    const type *gate, \
+    const type *weight, \
+    float *out \
+) { \
+    const size_t pair = static_cast<size_t>(blockIdx.x); \
+    const size_t tid = static_cast<size_t>(threadIdx.x); \
+    linear_decode_apply_gated_impl<type>( \
+        batch_size, num_v_heads, head_k_dim, head_v_dim, eps, packed, initial_state, gate, \
+        weight, out, pair, tid); \
+}
+
 #define DEFINE_DELTA_CHUNK_STEP_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_heads, \
@@ -1549,6 +1661,9 @@ DEFINE_LINEAR_DECODE_PREPARE_PACKED_CACHE_KERNEL(linear_decode_prepare_packed_ca
 DEFINE_LINEAR_DECODE_PREPARE_PACKED_CACHE_KERNEL(linear_decode_prepare_packed_cache_f32, float)
 DEFINE_LINEAR_DECODE_PREPARE_PACKED_CACHE_KERNEL(linear_decode_prepare_packed_cache_bf16, __nv_bfloat16)
 DEFINE_LINEAR_DECODE_APPLY_KERNEL(linear_decode_apply_f32)
+DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_f16, half)
+DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_f32, float)
+DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_bf16, __nv_bfloat16)
 
 DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f16, half)
 DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f32, float)
