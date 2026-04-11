@@ -121,6 +121,69 @@ __device__ inline void rms_norm_impl(
 }
 
 template <typename T>
+__device__ inline void l2norm_impl(
+    size_t n_rows,
+    size_t n_cols,
+    float eps,
+    const T *xs,
+    T *out
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    __shared__ float warp_sums[32];
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = blockDim.x / 32;
+    const size_t row_offset = row * n_cols;
+
+    float sq_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        const float x = qwen35_to_float(xs[row_offset + col]);
+        sq_sum += x * x;
+    }
+    sq_sum = qwen35_warp_reduce_sum(sq_sum);
+    if (lane_id == 0) {
+        warp_sums[warp_id] = sq_sum;
+    }
+    __syncthreads();
+
+    float total_sq_sum = (lane_id < num_warps) ? warp_sums[lane_id] : 0.0f;
+    if (warp_id == 0) {
+        total_sq_sum = qwen35_warp_reduce_sum(total_sq_sum);
+        if (lane_id == 0) {
+            warp_sums[0] = total_sq_sum;
+        }
+    }
+    __syncthreads();
+
+    const float inv_norm = rsqrtf(warp_sums[0] + eps);
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        const float x = qwen35_to_float(xs[row_offset + col]);
+        out[row_offset + col] = qwen35_from_float<T>(x * inv_norm);
+    }
+}
+
+template <typename T>
+__device__ inline void swiglu_mul_impl(
+    size_t elem_count,
+    const T *gate,
+    const T *up,
+    T *out,
+    size_t tid
+) {
+    if (tid >= elem_count) {
+        return;
+    }
+    const float g = qwen35_to_float(gate[tid]);
+    const float u = qwen35_to_float(up[tid]);
+    const float silu = g * qwen35_sigmoid_fast(g);
+    out[tid] = qwen35_from_float<T>(silu * u);
+}
+
+template <typename T>
 __device__ inline void rms_norm_gated_impl(
     size_t n_rows,
     size_t n_cols,
@@ -944,6 +1007,28 @@ extern "C" __global__ void name( \
     rms_norm_gated_impl<type>(n_rows, n_cols, eps, hidden, gate, weight, out); \
 }
 
+#define DEFINE_L2NORM_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t n_rows, \
+    size_t n_cols, \
+    float eps, \
+    const type *xs, \
+    type *out \
+) { \
+    l2norm_impl<type>(n_rows, n_cols, eps, xs, out); \
+}
+
+#define DEFINE_SWIGLU_MUL_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t elem_count, \
+    const type *gate, \
+    const type *up, \
+    type *out \
+) { \
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; \
+    swiglu_mul_impl<type>(elem_count, gate, up, out, tid); \
+}
+
 #define DEFINE_FULL_ATTN_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -1139,6 +1224,14 @@ DEFINE_RMS_NORM_KERNEL(rms_norm_bf16, __nv_bfloat16)
 DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_f16, half)
 DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_f32, float)
 DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_bf16, __nv_bfloat16)
+
+DEFINE_L2NORM_KERNEL(l2norm_f16, half)
+DEFINE_L2NORM_KERNEL(l2norm_f32, float)
+DEFINE_L2NORM_KERNEL(l2norm_bf16, __nv_bfloat16)
+
+DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_f16, half)
+DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_f32, float)
+DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_bf16, __nv_bfloat16)
 
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
