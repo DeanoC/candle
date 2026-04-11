@@ -62,6 +62,115 @@ __device__ inline float qwen35_softplus_fast(float x) {
     return log1pf(qwen35_exp_fast(x));
 }
 
+__device__ inline float qwen35_warp_reduce_sum(float value) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    return value;
+}
+
+template <typename T, bool ADD_UNIT_OFFSET>
+__device__ inline void rms_norm_impl(
+    size_t n_rows,
+    size_t n_cols,
+    float eps,
+    const T *xs,
+    const T *weight,
+    T *out
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    __shared__ float warp_sums[32];
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = blockDim.x / 32;
+    const size_t row_offset = row * n_cols;
+
+    float sq_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        const float x = qwen35_to_float(xs[row_offset + col]);
+        sq_sum += x * x;
+    }
+    sq_sum = qwen35_warp_reduce_sum(sq_sum);
+    if (lane_id == 0) {
+        warp_sums[warp_id] = sq_sum;
+    }
+    __syncthreads();
+
+    float total_sq_sum = (lane_id < num_warps) ? warp_sums[lane_id] : 0.0f;
+    if (warp_id == 0) {
+        total_sq_sum = qwen35_warp_reduce_sum(total_sq_sum);
+        if (lane_id == 0) {
+            warp_sums[0] = total_sq_sum;
+        }
+    }
+    __syncthreads();
+
+    const float inv_rms = rsqrtf(warp_sums[0] / static_cast<float>(n_cols) + eps);
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        float w = qwen35_to_float(weight[col]);
+        if (ADD_UNIT_OFFSET) {
+            w += 1.0f;
+        }
+        const float x = qwen35_to_float(xs[row_offset + col]);
+        out[row_offset + col] = qwen35_from_float<T>(x * inv_rms * w);
+    }
+}
+
+template <typename T>
+__device__ inline void rms_norm_gated_impl(
+    size_t n_rows,
+    size_t n_cols,
+    float eps,
+    const T *hidden,
+    const T *gate,
+    const T *weight,
+    T *out
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    __shared__ float warp_sums[32];
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = blockDim.x / 32;
+    const size_t row_offset = row * n_cols;
+
+    float sq_sum = 0.0f;
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        const float x = qwen35_to_float(hidden[row_offset + col]);
+        sq_sum += x * x;
+    }
+    sq_sum = qwen35_warp_reduce_sum(sq_sum);
+    if (lane_id == 0) {
+        warp_sums[warp_id] = sq_sum;
+    }
+    __syncthreads();
+
+    float total_sq_sum = (lane_id < num_warps) ? warp_sums[lane_id] : 0.0f;
+    if (warp_id == 0) {
+        total_sq_sum = qwen35_warp_reduce_sum(total_sq_sum);
+        if (lane_id == 0) {
+            warp_sums[0] = total_sq_sum;
+        }
+    }
+    __syncthreads();
+
+    const float inv_rms = rsqrtf(warp_sums[0] / static_cast<float>(n_cols) + eps);
+    for (size_t col = threadIdx.x; col < n_cols; col += blockDim.x) {
+        const float x = qwen35_to_float(hidden[row_offset + col]);
+        const float w = qwen35_to_float(weight[col]);
+        const float g = qwen35_to_float(gate[row_offset + col]);
+        const float silu = g * qwen35_sigmoid_fast(g);
+        out[row_offset + col] = qwen35_from_float<T>(x * inv_rms * w * silu);
+    }
+}
+
 template <typename T, typename IndexT>
 __device__ inline void embedding_lookup_impl(
     size_t token_count,
@@ -86,6 +195,7 @@ __device__ inline void embedding_lookup_impl(
     }
     out[tid] = embeddings[row * hidden_size + hidden_idx];
 }
+
 
 template <typename T>
 __device__ inline void linear_prefill_conv_pack_impl(
@@ -804,6 +914,36 @@ extern "C" __global__ void name( \
         token_count, vocab_size, hidden_size, embeddings, indexes, out, tid); \
 }
 
+#define DEFINE_RMS_NORM_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t n_rows, \
+    size_t n_cols, \
+    float eps, \
+    int add_unit_offset, \
+    const type *xs, \
+    const type *weight, \
+    type *out \
+) { \
+    if (add_unit_offset != 0) { \
+        rms_norm_impl<type, true>(n_rows, n_cols, eps, xs, weight, out); \
+    } else { \
+        rms_norm_impl<type, false>(n_rows, n_cols, eps, xs, weight, out); \
+    } \
+}
+
+#define DEFINE_RMS_NORM_GATED_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t n_rows, \
+    size_t n_cols, \
+    float eps, \
+    const type *hidden, \
+    const type *gate, \
+    const type *weight, \
+    type *out \
+) { \
+    rms_norm_gated_impl<type>(n_rows, n_cols, eps, hidden, gate, weight, out); \
+}
+
 #define DEFINE_FULL_ATTN_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -992,6 +1132,13 @@ DEFINE_LINEAR_PREFILL_CONV_PACK_KERNEL(linear_prefill_conv_pack_bf16, __nv_bfloa
 DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_f16, half, uint32_t)
 DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_f32, float, uint32_t)
 DEFINE_EMBEDDING_LOOKUP_KERNEL(embedding_lookup_u32_bf16, __nv_bfloat16, uint32_t)
+DEFINE_RMS_NORM_KERNEL(rms_norm_f16, half)
+DEFINE_RMS_NORM_KERNEL(rms_norm_f32, float)
+DEFINE_RMS_NORM_KERNEL(rms_norm_bf16, __nv_bfloat16)
+
+DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_f16, half)
+DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_f32, float)
+DEFINE_RMS_NORM_GATED_KERNEL(rms_norm_gated_bf16, __nv_bfloat16)
 
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
