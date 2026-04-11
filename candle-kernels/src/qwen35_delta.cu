@@ -776,6 +776,163 @@ __device__ inline void linear_decode_apply_gated_impl(
     }
 }
 
+template <typename T, int MAX_K = 256>
+__device__ inline void linear_decode_from_projected_gated_impl(
+    int batch_size,
+    int num_v_heads,
+    int head_k_dim,
+    int head_v_dim,
+    int state_len,
+    int kernel_size,
+    int head_repeat,
+    float eps,
+    const T *projected,
+    const T *prev_conv_state,
+    const T *weights,
+    const T *value_cache_pack,
+    const float *initial_state,
+    const T *norm_weight,
+    float *out,
+    size_t pair,
+    size_t tid
+) {
+    const int total_pairs = batch_size * num_v_heads;
+    if (pair >= static_cast<size_t>(total_pairs) || head_k_dim > MAX_K) {
+        return;
+    }
+    const bool active = tid < static_cast<size_t>(head_v_dim);
+
+    __shared__ float shared_sq_sum[32];
+    extern __shared__ float shared_heads[];
+    float *shared_q = shared_heads;
+    float *shared_k = shared_heads + MAX_K;
+
+    const int value_dim = num_v_heads * head_v_dim;
+    const int key_dim = (num_v_heads / head_repeat) * head_k_dim;
+    const int conv_dim = key_dim * 2 + value_dim;
+    const int projected_width = conv_dim + value_dim + 2 * num_v_heads;
+    const int batch = static_cast<int>(pair) / num_v_heads;
+    const int v_head = static_cast<int>(pair) - batch * num_v_heads;
+    const int k_head = v_head / head_repeat;
+    const int v_idx = static_cast<int>(tid);
+    const int projected_batch_base = batch * projected_width;
+    const int state_batch_base = batch * conv_dim * state_len;
+    const int state_head_base =
+        ((batch * num_v_heads + v_head) * head_k_dim) * head_v_dim + v_idx;
+    const int out_base =
+        batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + value_dim +
+        (v_head * head_k_dim) * head_v_dim + v_idx;
+
+    auto conv_channel = [&](int channel) -> float {
+        const int weight_base = channel * kernel_size;
+        const int state_base = state_batch_base + channel * state_len;
+        float acc = 0.0f;
+        for (int tap = 0; tap < kernel_size; ++tap) {
+            float x = 0.0f;
+            if (tap + 1 == kernel_size) {
+                x = qwen35_to_float(projected[projected_batch_base + channel]);
+            } else if (tap < state_len) {
+                x = qwen35_to_float(prev_conv_state[state_base + tap]);
+            }
+            acc += x * qwen35_to_float(weights[weight_base + tap]);
+        }
+        return acc * qwen35_sigmoid_fast(acc);
+    };
+
+    if (tid < static_cast<size_t>(head_k_dim)) {
+        const int q_base = k_head * head_k_dim;
+        const int k_base = key_dim + k_head * head_k_dim;
+        shared_q[tid] = conv_channel(q_base + static_cast<int>(tid));
+        shared_k[tid] = conv_channel(k_base + static_cast<int>(tid));
+    }
+    __syncthreads();
+
+    float beta = 0.0f;
+    float g_exp = 0.0f;
+    if (tid == 0) {
+        float q_sq_sum = 0.0f;
+        float k_sq_sum = 0.0f;
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            q_sq_sum += shared_q[k_idx] * shared_q[k_idx];
+            k_sq_sum += shared_k[k_idx] * shared_k[k_idx];
+        }
+        const float q_inv = rsqrtf(q_sq_sum + 1e-6f);
+        const float k_inv = rsqrtf(k_sq_sum + 1e-6f);
+        const float q_scale = rsqrtf(static_cast<float>(head_k_dim));
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            shared_q[k_idx] = shared_q[k_idx] * q_inv * q_scale;
+            shared_k[k_idx] = shared_k[k_idx] * k_inv;
+        }
+        const int beta_offset = projected_batch_base + conv_dim + value_dim + v_head;
+        const int a_offset = projected_batch_base + conv_dim + value_dim + num_v_heads + v_head;
+        beta = qwen35_sigmoid_fast(qwen35_to_float(projected[beta_offset]));
+        const float bias = qwen35_to_float(value_cache_pack[v_head]);
+        const float decay = qwen35_to_float(value_cache_pack[num_v_heads + v_head]);
+        const float g = -qwen35_softplus_fast(qwen35_to_float(projected[a_offset]) + bias) * decay;
+        g_exp = qwen35_exp_fast(g);
+        shared_sq_sum[0] = beta;
+        shared_sq_sum[1] = g_exp;
+    }
+    __syncthreads();
+    beta = shared_sq_sum[0];
+    g_exp = shared_sq_sum[1];
+
+    float out_value = 0.0f;
+    float state[MAX_K];
+    if (active) {
+        const int value_offset = projected_batch_base + key_dim * 2 + v_head * head_v_dim + v_idx;
+        const int gate_offset = projected_batch_base + conv_dim + v_head * head_v_dim + v_idx;
+        const float value = conv_channel(key_dim * 2 + v_head * head_v_dim + v_idx);
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            state[k_idx] = initial_state[state_head_base + k_idx * head_v_dim] * g_exp;
+        }
+        float kv_mem = 0.0f;
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            kv_mem += state[k_idx] * shared_k[k_idx];
+        }
+        const float delta = (value - kv_mem) * beta;
+        for (int k_idx = 0; k_idx < head_k_dim; ++k_idx) {
+            state[k_idx] += shared_k[k_idx] * delta;
+            out_value += state[k_idx] * shared_q[k_idx];
+            out[out_base + k_idx * head_v_dim] = state[k_idx];
+        }
+        const float gate_x = qwen35_to_float(projected[gate_offset]);
+        const float gate_silu = gate_x * qwen35_sigmoid_fast(gate_x);
+        const float w = qwen35_to_float(norm_weight[v_idx]);
+        shared_sq_sum[(threadIdx.x >> 5)] = 0.0f;
+        out[batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + v_head * head_v_dim + v_idx] =
+            out_value * gate_silu * w; // temporary, normalized below
+    }
+
+    float sq_sum = active ? out_value * out_value : 0.0f;
+    sq_sum = qwen35_warp_reduce_sum(sq_sum);
+    const unsigned lane = static_cast<unsigned>(threadIdx.x & 31);
+    const unsigned warp = static_cast<unsigned>(threadIdx.x >> 5);
+    if (lane == 0) {
+        shared_sq_sum[warp] = sq_sum;
+    }
+    __syncthreads();
+    float total_sq_sum = (threadIdx.x < 32)
+        ? ((threadIdx.x < ((blockDim.x + 31) >> 5)) ? shared_sq_sum[threadIdx.x] : 0.0f)
+        : 0.0f;
+    if (warp == 0) {
+        total_sq_sum = qwen35_warp_reduce_sum(total_sq_sum);
+        if (lane == 0) {
+            shared_sq_sum[0] = total_sq_sum;
+        }
+    }
+    __syncthreads();
+    const float inv_rms = rsqrtf(shared_sq_sum[0] / static_cast<float>(head_v_dim) + eps);
+    if (active) {
+        const int gate_offset = projected_batch_base + conv_dim + v_head * head_v_dim + v_idx;
+        const float gate_x = qwen35_to_float(projected[gate_offset]);
+        const float gate_silu = gate_x * qwen35_sigmoid_fast(gate_x);
+        const float w = qwen35_to_float(norm_weight[v_idx]);
+        out[batch * (value_dim + num_v_heads * head_k_dim * head_v_dim) + v_head * head_v_dim + v_idx] =
+            out_value * inv_rms * gate_silu * w;
+    }
+}
+
 template <typename T, int MAX_HEAD_DIM = 128>
 __device__ inline void full_attention_prefill_impl(
     size_t batch_size,
@@ -1518,6 +1675,32 @@ extern "C" __global__ void name( \
         weight, out, pair, tid); \
 }
 
+#define DEFINE_LINEAR_DECODE_FROM_PROJECTED_GATED_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    int batch_size, \
+    int num_v_heads, \
+    int head_k_dim, \
+    int head_v_dim, \
+    int state_len, \
+    int kernel_size, \
+    int head_repeat, \
+    float eps, \
+    const type *projected, \
+    const type *prev_conv_state, \
+    const type *weights, \
+    const type *value_cache_pack, \
+    const float *initial_state, \
+    const type *norm_weight, \
+    float *out \
+) { \
+    const size_t pair = static_cast<size_t>(blockIdx.x); \
+    const size_t tid = static_cast<size_t>(threadIdx.x); \
+    linear_decode_from_projected_gated_impl<type>( \
+        batch_size, num_v_heads, head_k_dim, head_v_dim, state_len, kernel_size, head_repeat, \
+        eps, projected, prev_conv_state, weights, value_cache_pack, initial_state, norm_weight, \
+        out, pair, tid); \
+}
+
 #define DEFINE_DELTA_CHUNK_STEP_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_heads, \
@@ -1664,6 +1847,9 @@ DEFINE_LINEAR_DECODE_APPLY_KERNEL(linear_decode_apply_f32)
 DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_f16, half)
 DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_f32, float)
 DEFINE_LINEAR_DECODE_APPLY_GATED_KERNEL(linear_decode_apply_gated_bf16, __nv_bfloat16)
+DEFINE_LINEAR_DECODE_FROM_PROJECTED_GATED_KERNEL(linear_decode_from_projected_gated_f16, half)
+DEFINE_LINEAR_DECODE_FROM_PROJECTED_GATED_KERNEL(linear_decode_from_projected_gated_f32, float)
+DEFINE_LINEAR_DECODE_FROM_PROJECTED_GATED_KERNEL(linear_decode_from_projected_gated_bf16, __nv_bfloat16)
 
 DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f16, half)
 DEFINE_DELTA_CHUNK_STEP_KERNEL(delta_chunk_step_f32, float)
