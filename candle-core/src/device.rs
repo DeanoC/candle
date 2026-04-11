@@ -495,7 +495,10 @@ impl Device {
         }
     }
 
-    pub(crate) fn storage_from_slice<D: WithDType>(&self, data: &[D]) -> Result<Storage> {
+    /// Creates backend storage from a typed slice.
+    ///
+    /// For accelerator backends this uploads the slice into backend storage.
+    pub fn storage_from_slice<D: WithDType>(&self, data: &[D]) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(data.to_cpu_storage())),
             Device::Cuda(device) => {
@@ -513,7 +516,8 @@ impl Device {
         }
     }
 
-    pub(crate) fn storage<A: NdArray>(&self, array: A) -> Result<Storage> {
+    /// Creates backend storage from an n-dimensional array-like value.
+    pub fn storage<A: NdArray>(&self, array: A) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(array.to_cpu_storage())),
             Device::Cuda(device) => {
@@ -534,7 +538,10 @@ impl Device {
         }
     }
 
-    pub(crate) fn storage_owned<S: WithDType>(&self, data: Vec<S>) -> Result<Storage> {
+    /// Creates backend storage from owned typed data.
+    ///
+    /// For accelerator backends this performs a single upload from the owned host buffer.
+    pub fn storage_owned<S: WithDType>(&self, data: Vec<S>) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(S::to_cpu_storage_owned(data))),
             Device::Cuda(device) => {
