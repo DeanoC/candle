@@ -69,6 +69,34 @@ __device__ inline float qwen35_warp_reduce_sum(float value) {
     return value;
 }
 
+__device__ inline float qwen35_warp_reduce_max(float value) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        value = fmaxf(value, __shfl_down_sync(0xffffffff, value, offset));
+    }
+    return value;
+}
+
+__device__ inline float qwen35_block_reduce_sum(float value) {
+    __shared__ float warp_sums[32];
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = (blockDim.x + 31) / 32;
+    value = qwen35_warp_reduce_sum(value);
+    if (lane_id == 0) {
+        warp_sums[warp_id] = value;
+    }
+    __syncthreads();
+    float total = (lane_id < num_warps) ? warp_sums[lane_id] : 0.0f;
+    if (warp_id == 0) {
+        total = qwen35_warp_reduce_sum(total);
+        if (lane_id == 0) {
+            warp_sums[0] = total;
+        }
+    }
+    __syncthreads();
+    return warp_sums[0];
+}
+
 template <typename T, bool ADD_UNIT_OFFSET>
 __device__ inline void rms_norm_impl(
     size_t n_rows,
@@ -217,6 +245,87 @@ __device__ inline void linear_decode_gemv_impl(
 
     if (threadIdx.x == 0) {
         out[row * out_dim + out_idx] = qwen35_from_float<T>(partial[0]);
+    }
+}
+
+template <typename T, int MAX_HEAD_DIM = 256>
+__device__ inline void full_attention_decode_impl(
+    size_t batch_size,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t q_len,
+    size_t kv_len,
+    size_t head_dim,
+    size_t num_kv_groups,
+    float scale,
+    size_t /*seqlen_offset*/,
+    const T *query,
+    const T *key,
+    const T *value,
+    T *out
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t total_rows = batch_size * q_heads;
+    if (row >= total_rows || q_len != 1 || head_dim > MAX_HEAD_DIM) {
+        return;
+    }
+
+    const size_t batch_idx = row / q_heads;
+    const size_t q_head_idx = row % q_heads;
+    const size_t kv_head_idx = q_head_idx / num_kv_groups;
+    const size_t query_base = ((batch_idx * q_heads + q_head_idx) * q_len) * head_dim;
+    const size_t kv_base = (batch_idx * kv_heads + kv_head_idx) * kv_len * head_dim;
+    const size_t out_base = query_base;
+
+    __shared__ float acc[MAX_HEAD_DIM];
+    __shared__ float row_max;
+    __shared__ float row_sum;
+    __shared__ float prev_scale;
+
+    for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        acc[d] = 0.0f;
+    }
+    if (threadIdx.x == 0) {
+        row_max = -INFINITY;
+        row_sum = 0.0f;
+        prev_scale = 0.0f;
+    }
+    __syncthreads();
+
+    for (size_t t = 0; t < kv_len; ++t) {
+        float dot = 0.0f;
+        const size_t key_row = kv_base + t * head_dim;
+        for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+            dot += qwen35_to_float(query[query_base + d]) * qwen35_to_float(key[key_row + d]);
+        }
+        dot = qwen35_block_reduce_sum(dot) * scale;
+        if (threadIdx.x == 0) {
+            const float new_max = fmaxf(row_max, dot);
+            prev_scale = (row_sum == 0.0f) ? 0.0f : qwen35_exp_fast(row_max - new_max);
+            row_max = new_max;
+            row_sum *= prev_scale;
+        }
+        __syncthreads();
+
+        if (prev_scale != 1.0f) {
+            for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+                acc[d] *= prev_scale;
+            }
+        }
+        const float weight = qwen35_exp_fast(dot - row_max);
+        const size_t value_row = kv_base + t * head_dim;
+        for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+            acc[d] += weight * qwen35_to_float(value[value_row + d]);
+        }
+        if (threadIdx.x == 0) {
+            row_sum += weight;
+        }
+        __syncthreads();
+    }
+
+    const float inv_sum = (row_sum == 0.0f) ? 0.0f : 1.0f / row_sum;
+    for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        out[out_base + d] = qwen35_from_float<T>(acc[d] * inv_sum);
     }
 }
 
@@ -1170,6 +1279,27 @@ extern "C" __global__ void name( \
     linear_decode_gemv_impl<type>(rows, out_dim, in_dim, xs, weight, out); \
 }
 
+#define DEFINE_FULL_ATTENTION_DECODE_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t batch_size, \
+    size_t q_heads, \
+    size_t kv_heads, \
+    size_t q_len, \
+    size_t kv_len, \
+    size_t head_dim, \
+    size_t num_kv_groups, \
+    float scale, \
+    size_t seqlen_offset, \
+    const type *query, \
+    const type *key, \
+    const type *value, \
+    type *out \
+) { \
+    full_attention_decode_impl<type>( \
+        batch_size, q_heads, kv_heads, q_len, kv_len, head_dim, num_kv_groups, scale, \
+        seqlen_offset, query, key, value, out); \
+}
+
 #define DEFINE_FULL_ATTN_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -1400,6 +1530,9 @@ DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_bf16, __nv_bfloat16)
 DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_f16, half)
 DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_f32, float)
 DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_bf16, __nv_bfloat16)
+DEFINE_FULL_ATTENTION_DECODE_KERNEL(full_attention_decode_f16, half)
+DEFINE_FULL_ATTENTION_DECODE_KERNEL(full_attention_decode_f32, float)
+DEFINE_FULL_ATTENTION_DECODE_KERNEL(full_attention_decode_bf16, __nv_bfloat16)
 
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
