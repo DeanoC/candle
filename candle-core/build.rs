@@ -100,5 +100,6 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=qwen35_hip");
     println!("cargo:rustc-link-lib=dylib=amdhip64");
+    println!("cargo:rustc-link-lib=dylib=rocblas");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 }

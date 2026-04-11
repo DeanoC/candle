@@ -13,7 +13,9 @@
 // placeholders until Candle grows a real HIP backend/runtime path.
 
 template <typename T>
-__device__ inline float qwen35_to_float(T value);
+__device__ inline float qwen35_to_float(T value) {
+    return static_cast<float>(value);
+}
 
 template <>
 __device__ inline float qwen35_to_float<float>(float value) {
@@ -31,7 +33,9 @@ __device__ inline float qwen35_to_float<hip_bfloat16>(hip_bfloat16 value) {
 }
 
 template <typename T>
-__device__ inline T qwen35_from_float(float value);
+__device__ inline T qwen35_from_float(float value) {
+    return static_cast<T>(value);
+}
 
 template <>
 __device__ inline float qwen35_from_float<float>(float value) {
@@ -46,6 +50,363 @@ __device__ inline half qwen35_from_float<half>(float value) {
 template <>
 __device__ inline hip_bfloat16 qwen35_from_float<hip_bfloat16>(float value) {
     return hip_bfloat16(value);
+}
+
+template <typename Src, typename Dst>
+__device__ inline Dst candle_hip_cast_value(Src value) {
+    return qwen35_from_float<Dst>(qwen35_to_float(value));
+}
+
+template <int BLOCK_SIZE>
+__device__ inline float candle_hip_block_reduce_sum(float value) {
+    __shared__ float shared[BLOCK_SIZE];
+    shared[threadIdx.x] = value;
+    __syncthreads();
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    return shared[0];
+}
+
+template <int BLOCK_SIZE>
+__device__ inline float candle_hip_block_reduce_max(float value) {
+    __shared__ float shared[BLOCK_SIZE];
+    shared[threadIdx.x] = value;
+    __syncthreads();
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] = fmaxf(shared[threadIdx.x], shared[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    return shared[0];
+}
+
+template <typename Src, typename Dst>
+__global__ void candle_hip_cast_kernel(size_t elem_count, const Src *src, Dst *dst) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        dst[tid] = candle_hip_cast_value<Src, Dst>(src[tid]);
+    }
+}
+
+template <typename T>
+__global__ void candle_hip_affine_kernel(
+    size_t elem_count,
+    const T *src,
+    float mul,
+    float add,
+    T *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        const float value = qwen35_to_float(src[tid]);
+        dst[tid] = qwen35_from_float<T>(value * mul + add);
+    }
+}
+
+template <typename T>
+__global__ void candle_hip_sigmoid_kernel(size_t elem_count, const T *src, T *dst) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        const float x = qwen35_to_float(src[tid]);
+        dst[tid] = qwen35_from_float<T>(1.0f / (1.0f + expf(-x)));
+    }
+}
+
+template <typename Pred, typename T>
+__global__ void candle_hip_where_cond_kernel(
+    size_t elem_count,
+    const Pred *pred,
+    const T *on_true,
+    const T *on_false,
+    T *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        dst[tid] = pred[tid] != static_cast<Pred>(0) ? on_true[tid] : on_false[tid];
+    }
+}
+
+template <typename T>
+__global__ void candle_hip_cmp_kernel(
+    int op,
+    size_t elem_count,
+    const T *lhs,
+    const T *rhs,
+    uint8_t *dst
+) {
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (tid < elem_count) {
+        const T l = lhs[tid];
+        const T r = rhs[tid];
+        bool out = false;
+        switch (op) {
+            case 0: out = l == r; break;
+            case 1: out = l != r; break;
+            case 2: out = l < r; break;
+            case 3: out = l <= r; break;
+            case 4: out = l > r; break;
+            case 5: out = l >= r; break;
+            default: out = false; break;
+        }
+        dst[tid] = static_cast<uint8_t>(out);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_sum_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = 0.0f;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local += qwen35_to_float(src_row[col]);
+    }
+    const float reduced = candle_hip_block_reduce_sum<BLOCK_SIZE>(local);
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(reduced);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_max_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = -INFINITY;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local = fmaxf(local, qwen35_to_float(src_row[col]));
+    }
+    const float reduced = candle_hip_block_reduce_max<BLOCK_SIZE>(local);
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(reduced);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_reduce_min_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    float local = INFINITY;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local = fminf(local, qwen35_to_float(src_row[col]));
+    }
+    __shared__ float shared[BLOCK_SIZE];
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] = fminf(shared[threadIdx.x], shared[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        dst[row] = qwen35_from_float<T>(shared[0]);
+    }
+}
+
+template <typename T, int BLOCK_SIZE = 256>
+__global__ void candle_hip_softmax_last_dim_kernel(
+    size_t n_rows,
+    size_t n_cols,
+    const T *src,
+    T *dst
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x);
+    const size_t tid = static_cast<size_t>(threadIdx.x);
+    if (row >= n_rows) {
+        return;
+    }
+
+    const T *src_row = src + row * n_cols;
+    T *dst_row = dst + row * n_cols;
+
+    float local_max = -INFINITY;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        local_max = fmaxf(local_max, qwen35_to_float(src_row[col]));
+    }
+    const float row_max = candle_hip_block_reduce_max<BLOCK_SIZE>(local_max);
+
+    float local_sum = 0.0f;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        const float value = expf(qwen35_to_float(src_row[col]) - row_max);
+        dst_row[col] = qwen35_from_float<T>(value);
+        local_sum += value;
+    }
+    const float row_sum = candle_hip_block_reduce_sum<BLOCK_SIZE>(local_sum);
+    const float inv_sum = row_sum > 0.0f ? 1.0f / row_sum : 0.0f;
+    for (size_t col = tid; col < n_cols; col += BLOCK_SIZE) {
+        dst_row[col] = qwen35_from_float<T>(qwen35_to_float(dst_row[col]) * inv_sum);
+    }
+}
+
+template <typename T>
+__device__ inline void candle_hip_ropei(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t stride_b
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (2 * idx >= bh * td) {
+        return;
+    }
+
+    uint32_t rope_idx = idx % (td / 2);
+    if (stride_b > 0) {
+        const uint32_t b_idx = (2 * idx) / stride_b;
+        rope_idx += b_idx * (td / 2);
+    }
+    const T c = cos[rope_idx];
+    const T s = sin[rope_idx];
+
+    dst[2 * idx] = src[2 * idx] * c - src[2 * idx + 1] * s;
+    dst[2 * idx + 1] = src[2 * idx] * s + src[2 * idx + 1] * c;
+}
+
+template <typename T>
+__device__ inline void candle_hip_rope(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t d,
+    uint32_t stride_b
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (2 * idx >= bh * td) {
+        return;
+    }
+
+    const uint32_t i_bh = idx / (td / 2);
+    const uint32_t i_td = idx - (td / 2) * i_bh;
+    const uint32_t i_t = i_td / (d / 2);
+    const uint32_t i_d = i_td - (d / 2) * i_t;
+    const uint32_t i1 = i_bh * td + i_t * d + i_d;
+    const uint32_t i2 = i1 + d / 2;
+    uint32_t i_cs = i_t * (d / 2) + i_d;
+    if (stride_b > 0) {
+        const uint32_t b_idx = (2 * idx) / stride_b;
+        i_cs += b_idx * (td / 2);
+    }
+    const T c = cos[i_cs];
+    const T s = sin[i_cs];
+
+    dst[i1] = src[i1] * c - src[i2] * s;
+    dst[i2] = src[i1] * s + src[i2] * c;
+}
+
+template <typename T>
+__device__ inline void candle_hip_rope_thd(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t b,
+    uint32_t t,
+    uint32_t h,
+    uint32_t d,
+    uint32_t stride_b
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (2 * idx >= b * t * h * d) {
+        return;
+    }
+
+    const uint32_t i_bth = idx / (d / 2);
+    const uint32_t i_d = idx - (d / 2) * i_bth;
+    const uint32_t i_t = (i_bth / h) % t;
+    const uint32_t i1 = i_bth * d + i_d;
+    const uint32_t i2 = i1 + d / 2;
+    uint32_t i_cs = i_t * (d / 2) + i_d;
+    if (stride_b > 0) {
+        const uint32_t b_idx = (2 * idx) / stride_b;
+        i_cs += b_idx * ((t * d) / 2);
+    }
+    const T c = cos[i_cs];
+    const T s = sin[i_cs];
+
+    dst[i1] = src[i1] * c - src[i2] * s;
+    dst[i2] = src[i1] * s + src[i2] * c;
+}
+
+template <typename T>
+__global__ void candle_hip_rope_i_kernel(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t stride_b
+) {
+    candle_hip_ropei<T>(src, cos, sin, dst, bh, td, stride_b);
+}
+
+template <typename T>
+__global__ void candle_hip_rope_kernel(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t bh,
+    uint32_t td,
+    uint32_t d,
+    uint32_t stride_b
+) {
+    candle_hip_rope<T>(src, cos, sin, dst, bh, td, d, stride_b);
+}
+
+template <typename T>
+__global__ void candle_hip_rope_thd_kernel(
+    const T *src,
+    const T *cos,
+    const T *sin,
+    T *dst,
+    uint32_t b,
+    uint32_t t,
+    uint32_t h,
+    uint32_t d,
+    uint32_t stride_b
+) {
+    candle_hip_rope_thd<T>(src, cos, sin, dst, b, t, h, d, stride_b);
 }
 
 __device__ inline float qwen35_wave_sum(float value, int wave_size) {

@@ -223,6 +223,61 @@ impl candle::CustomOp3 for RotaryEmbI {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::{BackendDevice, BackendStorage};
+        let contiguous = (
+            l1.contiguous_offsets(),
+            l2.contiguous_offsets(),
+            l3.contiguous_offsets(),
+        );
+        let dtype = candle::hip::hip_dtype_code(s1.dtype());
+        if let (Some((o1, _)), Some((o2, _)), Some((o3, _)), Ok(dtype)) =
+            (contiguous.0, contiguous.1, contiguous.2, dtype)
+        {
+            let (b, h, t, d) = l1.shape().dims4()?;
+            let stride_b = if l2.dims().len() == 3 && l3.dims().len() == 3 {
+                (h * t * d) as u32
+            } else {
+                0u32
+            };
+            let output = unsafe { s1.device().alloc_uninit(l1.shape(), s1.dtype())? };
+            let status = unsafe {
+                candle::hip::ffi::candle_hip_rope_i_contiguous(
+                    dtype,
+                    s1.device().ordinal(),
+                    (b * h) as u32,
+                    (t * d) as u32,
+                    stride_b,
+                    s1.raw_device_ptr_with_offset(o1)?,
+                    s2.raw_device_ptr_with_offset(o2)?,
+                    s3.raw_device_ptr_with_offset(o3)?,
+                    output.raw_device_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(candle::hip::qwen35_error(self.name(), status));
+            }
+            Ok((output, l1.shape().clone()))
+        } else {
+            let c1 = s1.to_cpu_storage()?;
+            let c2 = s2.to_cpu_storage()?;
+            let c3 = s3.to_cpu_storage()?;
+            let (cpu_storage, shape) = self.cpu_fwd(&c1, l1, &c2, l2, &c3, l3)?;
+            let hip_storage =
+                candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+            Ok((hip_storage, shape))
+        }
+    }
 }
 
 fn rope_check_cs(cs: &Tensor, b_sz: usize) -> Result<(usize, usize)> {
@@ -507,6 +562,62 @@ impl candle::CustomOp3 for RotaryEmb {
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
     }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::{BackendDevice, BackendStorage};
+        let contiguous = (
+            l1.contiguous_offsets(),
+            l2.contiguous_offsets(),
+            l3.contiguous_offsets(),
+        );
+        let dtype = candle::hip::hip_dtype_code(s1.dtype());
+        if let (Some((o1, _)), Some((o2, _)), Some((o3, _)), Ok(dtype)) =
+            (contiguous.0, contiguous.1, contiguous.2, dtype)
+        {
+            let (b, h, t, d) = l1.shape().dims4()?;
+            let stride_b = if l2.dims().len() == 3 && l3.dims().len() == 3 {
+                (h * t * d) as u32
+            } else {
+                0u32
+            };
+            let output = unsafe { s1.device().alloc_uninit(l1.shape(), s1.dtype())? };
+            let status = unsafe {
+                candle::hip::ffi::candle_hip_rope_contiguous(
+                    dtype,
+                    s1.device().ordinal(),
+                    (b * h) as u32,
+                    (t * d) as u32,
+                    d as u32,
+                    stride_b,
+                    s1.raw_device_ptr_with_offset(o1)?,
+                    s2.raw_device_ptr_with_offset(o2)?,
+                    s3.raw_device_ptr_with_offset(o3)?,
+                    output.raw_device_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(candle::hip::qwen35_error(self.name(), status));
+            }
+            Ok((output, l1.shape().clone()))
+        } else {
+            let c1 = s1.to_cpu_storage()?;
+            let c2 = s2.to_cpu_storage()?;
+            let c3 = s3.to_cpu_storage()?;
+            let (cpu_storage, shape) = self.cpu_fwd(&c1, l1, &c2, l2, &c3, l3)?;
+            let hip_storage =
+                candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+            Ok((hip_storage, shape))
+        }
+    }
 }
 
 pub fn rope(xs: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
@@ -777,6 +888,63 @@ impl candle::CustomOp3 for RotaryEmbThd {
         .map_err(candle::Error::wrap)?;
         let out = candle::MetalStorage::new(output, device.clone(), el, src.dtype());
         Ok((out, l_src.shape().clone()))
+    }
+
+    #[cfg(feature = "hip")]
+    fn hip_fwd(
+        &self,
+        s1: &candle::HipStorage,
+        l1: &Layout,
+        s2: &candle::HipStorage,
+        l2: &Layout,
+        s3: &candle::HipStorage,
+        l3: &Layout,
+    ) -> Result<(candle::HipStorage, Shape)> {
+        use candle::backend::{BackendDevice, BackendStorage};
+        let contiguous = (
+            l1.contiguous_offsets(),
+            l2.contiguous_offsets(),
+            l3.contiguous_offsets(),
+        );
+        let dtype = candle::hip::hip_dtype_code(s1.dtype());
+        if let (Some((o1, _)), Some((o2, _)), Some((o3, _)), Ok(dtype)) =
+            (contiguous.0, contiguous.1, contiguous.2, dtype)
+        {
+            let (b, t, h, d) = l1.shape().dims4()?;
+            let stride_b = if l2.dims().len() == 3 && l3.dims().len() == 3 {
+                (h * t * d) as u32
+            } else {
+                0u32
+            };
+            let output = unsafe { s1.device().alloc_uninit(l1.shape(), s1.dtype())? };
+            let status = unsafe {
+                candle::hip::ffi::candle_hip_rope_thd_contiguous(
+                    dtype,
+                    s1.device().ordinal(),
+                    b as u32,
+                    t as u32,
+                    h as u32,
+                    d as u32,
+                    stride_b,
+                    s1.raw_device_ptr_with_offset(o1)?,
+                    s2.raw_device_ptr_with_offset(o2)?,
+                    s3.raw_device_ptr_with_offset(o3)?,
+                    output.raw_device_ptr(),
+                )
+            };
+            if status != 0 {
+                return Err(candle::hip::qwen35_error(self.name(), status));
+            }
+            Ok((output, l1.shape().clone()))
+        } else {
+            let c1 = s1.to_cpu_storage()?;
+            let c2 = s2.to_cpu_storage()?;
+            let c3 = s3.to_cpu_storage()?;
+            let (cpu_storage, shape) = self.cpu_fwd(&c1, l1, &c2, l2, &c3, l3)?;
+            let hip_storage =
+                candle::HipStorage::wrap_cpu_storage(cpu_storage, s1.device().clone());
+            Ok((hip_storage, shape))
+        }
     }
 }
 
