@@ -184,6 +184,43 @@ __device__ inline void swiglu_mul_impl(
 }
 
 template <typename T>
+__device__ inline void linear_decode_gemv_impl(
+    size_t rows,
+    size_t out_dim,
+    size_t in_dim,
+    const T *xs,
+    const T *weight,
+    T *out
+) {
+    const size_t out_idx = static_cast<size_t>(blockIdx.x);
+    const size_t row = static_cast<size_t>(blockIdx.y);
+    if (row >= rows || out_idx >= out_dim) {
+        return;
+    }
+
+    __shared__ float partial[256];
+    const size_t row_offset = row * in_dim;
+    const size_t weight_offset = out_idx * in_dim;
+    float sum = 0.0f;
+    for (size_t col = threadIdx.x; col < in_dim; col += blockDim.x) {
+        sum += qwen35_to_float(xs[row_offset + col]) * qwen35_to_float(weight[weight_offset + col]);
+    }
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+
+    for (size_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out[row * out_dim + out_idx] = qwen35_from_float<T>(partial[0]);
+    }
+}
+
+template <typename T>
 __device__ inline void rms_norm_gated_impl(
     size_t n_rows,
     size_t n_cols,
@@ -1121,6 +1158,18 @@ extern "C" __global__ void name( \
     swiglu_mul_impl<type>(elem_count, gate, up, out, tid); \
 }
 
+#define DEFINE_LINEAR_DECODE_GEMV_KERNEL(name, type) \
+extern "C" __global__ void name( \
+    size_t rows, \
+    size_t out_dim, \
+    size_t in_dim, \
+    const type *xs, \
+    const type *weight, \
+    type *out \
+) { \
+    linear_decode_gemv_impl<type>(rows, out_dim, in_dim, xs, weight, out); \
+}
+
 #define DEFINE_FULL_ATTN_PREFILL_KERNEL(name, type) \
 extern "C" __global__ void name( \
     size_t batch_size, \
@@ -1348,6 +1397,9 @@ DEFINE_L2NORM_KERNEL(l2norm_bf16, __nv_bfloat16)
 DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_f16, half)
 DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_f32, float)
 DEFINE_SWIGLU_MUL_KERNEL(swiglu_mul_bf16, __nv_bfloat16)
+DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_f16, half)
+DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_f32, float)
+DEFINE_LINEAR_DECODE_GEMV_KERNEL(linear_decode_gemv_bf16, __nv_bfloat16)
 
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f16, half)
 DEFINE_FULL_ATTN_PREFILL_KERNEL(full_attention_prefill_f32, float)
