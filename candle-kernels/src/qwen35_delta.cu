@@ -787,7 +787,7 @@ __device__ inline void linear_decode_from_projected_gated_impl(
     int head_repeat,
     float eps,
     const T *projected,
-    const T *prev_conv_state,
+    T *prev_conv_state,
     const T *weights,
     const T *value_cache_pack,
     float *state,
@@ -898,6 +898,33 @@ __device__ inline void linear_decode_from_projected_gated_impl(
         const float w = qwen35_to_float(norm_weight[v_idx]);
         shared_sq_sum[(threadIdx.x >> 5)] = 0.0f;
         out[out_base] = out_value * gate_silu * w; // temporary, normalized below
+    }
+
+    if (state_len > 0) {
+        const bool owns_qk = (v_head % head_repeat) == 0;
+        if (owns_qk && tid < static_cast<size_t>(head_k_dim)) {
+            const int q_channel = k_head * head_k_dim + static_cast<int>(tid);
+            const int k_channel = key_dim + k_head * head_k_dim + static_cast<int>(tid);
+            const int q_state_base = state_batch_base + q_channel * state_len;
+            const int k_state_base = state_batch_base + k_channel * state_len;
+            for (int tap = 0; tap + 1 < state_len; ++tap) {
+                prev_conv_state[q_state_base + tap] = prev_conv_state[q_state_base + tap + 1];
+                prev_conv_state[k_state_base + tap] = prev_conv_state[k_state_base + tap + 1];
+            }
+            prev_conv_state[q_state_base + state_len - 1] =
+                projected[projected_batch_base + q_channel];
+            prev_conv_state[k_state_base + state_len - 1] =
+                projected[projected_batch_base + k_channel];
+        }
+        if (tid < static_cast<size_t>(head_v_dim)) {
+            const int v_channel = key_dim * 2 + v_head * head_v_dim + static_cast<int>(tid);
+            const int v_state_base = state_batch_base + v_channel * state_len;
+            for (int tap = 0; tap + 1 < state_len; ++tap) {
+                prev_conv_state[v_state_base + tap] = prev_conv_state[v_state_base + tap + 1];
+            }
+            prev_conv_state[v_state_base + state_len - 1] =
+                projected[projected_batch_base + v_channel];
+        }
     }
 
     float sq_sum = active ? out_value * out_value : 0.0f;
@@ -1596,7 +1623,7 @@ extern "C" __global__ void name( \
     int kernel_size, \
     int head_repeat, \
     const type *mixed_qkv, \
-    const type *prev_conv_state, \
+    type *prev_conv_state, \
     const type *weights, \
     const type *a_beta_raw, \
     const type *dt_bias, \
@@ -1620,7 +1647,7 @@ extern "C" __global__ void name( \
     int kernel_size, \
     int head_repeat, \
     const type *mixed_qkv, \
-    const type *prev_conv_state, \
+    type *prev_conv_state, \
     const type *weights, \
     const type *a_raw, \
     const type *beta_raw, \
@@ -1681,7 +1708,7 @@ extern "C" __global__ void name( \
     int head_repeat, \
     float eps, \
     const type *projected, \
-    const type *prev_conv_state, \
+    type *prev_conv_state, \
     const type *weights, \
     const type *value_cache_pack, \
     float *state, \
