@@ -990,6 +990,7 @@ __device__ inline void linear_decode_from_hidden_gated_impl(
     float *shared_k = shared_heads + MAX_K;
     float *shared_q_raw = shared_heads + 2 * MAX_K;
     float *shared_k_raw = shared_heads + 3 * MAX_K;
+    float *shared_hidden = shared_heads + 4 * MAX_K;
 
     const int value_dim = num_v_heads * head_v_dim;
     const int key_dim = (num_v_heads / head_repeat) * head_k_dim;
@@ -1005,11 +1006,16 @@ __device__ inline void linear_decode_from_hidden_gated_impl(
         ((batch * num_v_heads + v_head) * head_k_dim) * head_v_dim + v_idx;
     const int out_base = batch * value_dim + v_head * head_v_dim + v_idx;
 
+    for (size_t col = tid; col < static_cast<size_t>(hidden_size); col += blockDim.x) {
+        shared_hidden[col] = qwen35_to_float(hidden[hidden_batch_base + static_cast<int>(col)]);
+    }
+    __syncthreads();
+
     auto project_channel = [&](int channel) -> float {
         const int weight_base = channel * hidden_size;
         float acc = 0.0f;
         for (int col = 0; col < hidden_size; ++col) {
-            acc += qwen35_to_float(hidden[hidden_batch_base + col]) *
+            acc += shared_hidden[col] *
                 qwen35_to_float(qkv_zba_weight[weight_base + col]);
         }
         return acc;
