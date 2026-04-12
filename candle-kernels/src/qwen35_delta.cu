@@ -258,7 +258,7 @@ __device__ inline void full_attention_decode_impl(
     size_t head_dim,
     size_t num_kv_groups,
     float scale,
-    size_t /*seqlen_offset*/,
+    size_t seqlen_offset,
     const T *query,
     const T *key,
     const T *value,
@@ -266,16 +266,21 @@ __device__ inline void full_attention_decode_impl(
 ) {
     const size_t row = static_cast<size_t>(blockIdx.x);
     const size_t total_rows = batch_size * q_heads;
-    if (row >= total_rows || q_len != 1 || head_dim > MAX_HEAD_DIM) {
+    if (row >= total_rows || q_len != 1 || head_dim > MAX_HEAD_DIM || kv_heads == 0 ||
+        num_kv_groups == 0) {
         return;
     }
 
     const size_t batch_idx = row / q_heads;
     const size_t q_head_idx = row % q_heads;
-    const size_t kv_head_idx = q_head_idx / num_kv_groups;
+    size_t kv_head_idx = q_head_idx / num_kv_groups;
+    if (kv_head_idx >= kv_heads) {
+        kv_head_idx = kv_heads - 1;
+    }
     const size_t query_base = ((batch_idx * q_heads + q_head_idx) * q_len) * head_dim;
     const size_t kv_base = (batch_idx * kv_heads + kv_head_idx) * kv_len * head_dim;
     const size_t out_base = query_base;
+    const size_t causal_limit = min(kv_len, seqlen_offset + 1);
 
     __shared__ float acc[MAX_HEAD_DIM];
     __shared__ float row_max;
@@ -292,7 +297,7 @@ __device__ inline void full_attention_decode_impl(
     }
     __syncthreads();
 
-    for (size_t t = 0; t < kv_len; ++t) {
+    for (size_t t = 0; t < causal_limit; ++t) {
         float dot = 0.0f;
         const size_t key_row = kv_base + t * head_dim;
         for (size_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
